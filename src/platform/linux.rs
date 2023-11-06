@@ -5,7 +5,9 @@ use desktop::Desktop;
 use hbb_common::config::CONFIG_OPTION_ALLOW_LINUX_HEADLESS;
 pub use hbb_common::platform::linux::*;
 use hbb_common::{
-    allow_err, bail,
+    allow_err,
+    anyhow::anyhow,
+    bail,
     config::Config,
     libc::{c_char, c_int, c_long, c_void},
     log,
@@ -26,11 +28,16 @@ use std::{
     time::{Duration, Instant},
 };
 use users::{get_user_by_name, os::unix::UserExt};
+use wallpaper;
 
 type Xdo = *const c_void;
 
 pub const PA_SAMPLE_RATE: u32 = 48000;
 static mut UNMODIFIED: bool = true;
+
+lazy_static::lazy_static! {
+    pub static ref IS_X11: bool = hbb_common::platform::linux::is_x11_or_headless();
+}
 
 thread_local! {
     static XDO: RefCell<Xdo> = RefCell::new(unsafe { xdo_new(std::ptr::null()) });
@@ -1310,4 +1317,73 @@ NoDisplay=false
         )?;
     }
     Ok(())
+}
+
+pub struct WallPaperRemover {
+    old_path: String,
+    old_path_dark: Option<String>, // ubuntu 22.04 light/dark theme have different uri
+}
+
+impl WallPaperRemover {
+    pub fn new() -> ResultType<Self> {
+        let start = std::time::Instant::now();
+        let old_path = wallpaper::get().map_err(|e| anyhow!(e.to_string()))?;
+        let old_path_dark = wallpaper::get_dark().ok();
+        if old_path.is_empty() && old_path_dark.clone().unwrap_or_default().is_empty() {
+            bail!("already solid color");
+        }
+        wallpaper::set_from_path("").map_err(|e| anyhow!(e.to_string()))?;
+        wallpaper::set_dark_from_path("").ok();
+        log::info!(
+            "created wallpaper remover,  old_path:{:?}, old_path_dark:{:?}, elapsed:{:?}",
+            old_path,
+            old_path_dark,
+            start.elapsed(),
+        );
+        Ok(Self {
+            old_path,
+            old_path_dark,
+        })
+    }
+
+    pub fn support() -> bool {
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        if wallpaper::gnome::is_compliant(&desktop) || desktop.as_str() == "XFCE" {
+            return wallpaper::get().is_ok();
+        }
+        false
+    }
+}
+
+impl Drop for WallPaperRemover {
+    fn drop(&mut self) {
+        allow_err!(wallpaper::set_from_path(&self.old_path).map_err(|e| anyhow!(e.to_string())));
+        if let Some(old_path_dark) = &self.old_path_dark {
+            allow_err!(wallpaper::set_dark_from_path(old_path_dark.as_str())
+                .map_err(|e| anyhow!(e.to_string())));
+        }
+    }
+}
+
+#[inline]
+pub fn is_x11() -> bool {
+    *IS_X11
+}
+
+#[inline]
+pub fn is_selinux_enforcing() -> bool {
+    match run_cmds("getenforce") {
+        Ok(output) => output.trim() == "Enforcing",
+        Err(_) => match run_cmds("sestatus") {
+            Ok(output) => {
+                for line in output.lines() {
+                    if line.contains("Current mode:") {
+                        return line.contains("enforcing");
+                    }
+                }
+                false
+            }
+            Err(_) => false,
+        },
+    }
 }
