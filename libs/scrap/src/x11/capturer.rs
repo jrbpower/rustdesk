@@ -1,11 +1,7 @@
-use std::{io, ptr, slice};
-
-use hbb_common::libc;
-
-use crate::Frame;
-
 use super::ffi::*;
 use super::Display;
+use hbb_common::libc;
+use std::{io, ptr, slice};
 
 pub struct Capturer {
     display: Display,
@@ -21,7 +17,7 @@ impl Capturer {
     pub fn new(display: Display) -> io::Result<Capturer> {
         // Calculate dimensions.
 
-        let pixel_width = 4;
+        let pixel_width = display.pixfmt().bytes_per_pixel();
         let rect = display.rect();
         let size = (rect.w as usize) * (rect.h as usize) * pixel_width;
 
@@ -97,13 +93,11 @@ impl Capturer {
         }
     }
 
-    pub fn frame<'b>(&'b mut self) -> std::io::Result<Frame> {
+    pub fn frame<'b>(&'b mut self) -> std::io::Result<&'b [u8]> {
         self.get_image();
         let result = unsafe { slice::from_raw_parts(self.buffer, self.size) };
         crate::would_block_if_equal(&mut self.saved_raw_data, result)?;
-        Ok(
-            Frame::new(result, crate::Pixfmt::BGRA, self.display.w(), self.display.h())
-       )
+        Ok(result)
     }
 }
 

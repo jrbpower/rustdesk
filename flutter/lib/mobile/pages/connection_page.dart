@@ -9,19 +9,16 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
 
 import '../../common.dart';
-import '../../common/widgets/login.dart';
 import '../../common/widgets/peer_tab_page.dart';
 import '../../common/widgets/autocomplete.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import 'home_page.dart';
-import 'scan_page.dart';
-import 'settings_page.dart';
 
 /// Connection page for connecting to a remote peer.
 class ConnectionPage extends StatefulWidget implements PageShape {
-  ConnectionPage({Key? key}) : super(key: key);
+  ConnectionPage({Key? key, required this.appBarActions}) : super(key: key);
 
   @override
   final icon = const Icon(Icons.connected_tv);
@@ -30,7 +27,7 @@ class ConnectionPage extends StatefulWidget implements PageShape {
   final title = translate("Connection");
 
   @override
-  final appBarActions = isWeb ? <Widget>[const WebMenu()] : <Widget>[];
+  final List<Widget> appBarActions;
 
   @override
   State<ConnectionPage> createState() => _ConnectionPageState();
@@ -45,42 +42,40 @@ class _ConnectionPageState extends State<ConnectionPage> {
   /// Update url. If it's not null, means an update is available.
   var _updateUrl = '';
   List<Peer> peers = [];
-  List _frontN<T>(List list, int n) {
-    if (list.length <= n) {
-      return list;
-    } else {
-      return list.sublist(0, n);
-    }
-  }
+
   bool isPeersLoading = false;
   bool isPeersLoaded = false;
   StreamSubscription? _uniLinksSubscription;
 
+  _ConnectionPageState() {
+    if (!isWeb) _uniLinksSubscription = listenUniLinks();
+    _idController.addListener(() {
+      _idEmpty.value = _idController.text.isEmpty;
+    });
+    Get.put<IDTextEditingController>(_idController);
+  }
+
   @override
   void initState() {
     super.initState();
-    _uniLinksSubscription = listenUniLinks();
     if (_idController.text.isEmpty) {
-      () async {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
         final lastRemoteId = await bind.mainGetLastRemoteId();
         if (lastRemoteId != _idController.id) {
           setState(() {
             _idController.id = lastRemoteId;
           });
         }
-      }();
-    }
-    if (isAndroid) {
-      Timer(const Duration(seconds: 1), () async {
-        _updateUrl = await bind.mainGetSoftwareUpdateUrl();
-        if (_updateUrl.isNotEmpty) setState(() {});
       });
     }
-
-    _idController.addListener(() {
-      _idEmpty.value = _idController.text.isEmpty;
-    });
-    Get.put<IDTextEditingController>(_idController);
+    if (isAndroid) {
+      if (!bind.isCustomClient()) {
+        Timer(const Duration(seconds: 1), () async {
+          _updateUrl = await bind.mainGetSoftwareUpdateUrl();
+          if (_updateUrl.isNotEmpty) setState(() {});
+        });
+      }
+    }
   }
 
   @override
@@ -90,7 +85,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
       slivers: [
         SliverList(
             delegate: SliverChildListDelegate([
-          _buildUpdateUI(),
+          if (!bind.isCustomClient()) _buildUpdateUI(),
           _buildRemoteIDTextField(),
         ])),
         SliverFillRemaining(
@@ -137,9 +132,9 @@ class _ConnectionPageState extends State<ConnectionPage> {
     await Future.delayed(Duration(milliseconds: 100));
     peers = await getAllPeers();
     setState(() {
-        isPeersLoading = false;
-        isPeersLoaded = true;
-      });
+      isPeersLoading = false;
+      isPeersLoaded = true;
+    });
   }
 
   /// UI for the remote ID TextField.
@@ -163,9 +158,8 @@ class _ConnectionPageState extends State<ConnectionPage> {
                     optionsBuilder: (TextEditingValue textEditingValue) {
                       if (textEditingValue.text == '') {
                         return const Iterable<Peer>.empty();
-                      }
-                      else if (peers.isEmpty && !isPeersLoaded) {
-                         Peer emptyPeer = Peer(
+                      } else if (peers.isEmpty && !isPeersLoaded) {
+                        Peer emptyPeer = Peer(
                           id: '',
                           username: '',
                           hostname: '',
@@ -173,15 +167,16 @@ class _ConnectionPageState extends State<ConnectionPage> {
                           platform: '',
                           tags: [],
                           hash: '',
+                          password: '',
                           forceAlwaysRelay: false,
                           rdpPort: '',
                           rdpUsername: '',
                           loginName: '',
                         );
                         return [emptyPeer];
-                      }
-                      else {
-                        String textWithoutSpaces = textEditingValue.text.replaceAll(" ", "");
+                      } else {
+                        String textWithoutSpaces =
+                            textEditingValue.text.replaceAll(" ", "");
                         if (int.tryParse(textWithoutSpaces) != null) {
                           textEditingValue = TextEditingValue(
                             text: textWithoutSpaces,
@@ -190,62 +185,74 @@ class _ConnectionPageState extends State<ConnectionPage> {
                         }
                         String textToFind = textEditingValue.text.toLowerCase();
 
-                        return peers.where((peer) =>
-                        peer.id.toLowerCase().contains(textToFind) ||
-                        peer.username.toLowerCase().contains(textToFind) ||
-                        peer.hostname.toLowerCase().contains(textToFind) ||
-                        peer.alias.toLowerCase().contains(textToFind))
-                        .toList();
+                        return peers
+                            .where((peer) =>
+                                peer.id.toLowerCase().contains(textToFind) ||
+                                peer.username
+                                    .toLowerCase()
+                                    .contains(textToFind) ||
+                                peer.hostname
+                                    .toLowerCase()
+                                    .contains(textToFind) ||
+                                peer.alias.toLowerCase().contains(textToFind))
+                            .toList();
                       }
                     },
                     fieldViewBuilder: (BuildContext context,
-                      TextEditingController fieldTextEditingController,
-                      FocusNode fieldFocusNode, VoidCallback onFieldSubmitted) {
+                        TextEditingController fieldTextEditingController,
+                        FocusNode fieldFocusNode,
+                        VoidCallback onFieldSubmitted) {
                       fieldTextEditingController.text = _idController.text;
-                      fieldFocusNode.addListener(() async{
-                      _idEmpty.value = fieldTextEditingController.text.isEmpty;
-                        if (fieldFocusNode.hasFocus && !isPeersLoading){
+                      fieldFocusNode.addListener(() async {
+                        _idEmpty.value =
+                            fieldTextEditingController.text.isEmpty;
+                        if (fieldFocusNode.hasFocus && !isPeersLoading) {
                           _fetchPeers();
                         }
                       });
-                      final textLength = fieldTextEditingController.value.text.length;
+                      final textLength =
+                          fieldTextEditingController.value.text.length;
                       // select all to facilitate removing text, just following the behavior of address input of chrome
-                      fieldTextEditingController.selection = TextSelection(baseOffset: 0, extentOffset: textLength);
-                    return AutoSizeTextField(
-                    controller: fieldTextEditingController,
-                    focusNode: fieldFocusNode,
-                    minFontSize: 18,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    keyboardType: TextInputType.visiblePassword,
-                    // keyboardType: TextInputType.number,
-                    onChanged: (String text) {
-                      _idController.id = text;
-                    },
-                    style: const TextStyle(
-                      fontFamily: 'WorkSans',
-                      fontWeight: FontWeight.bold,
-                      fontSize: 30,
-                      color: MyTheme.idColor,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: translate('Remote ID'),
-                      // hintText: 'Enter your remote ID',
-                      border: InputBorder.none,
-                      helperStyle: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                        color: MyTheme.darkGray,
-                      ),
-                      labelStyle: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 16,
-                        letterSpacing: 0.2,
-                        color: MyTheme.darkGray,
-                      ),
-                    ),
-                    inputFormatters: [IDTextInputFormatter()],
-                     );
+                      fieldTextEditingController.selection = TextSelection(
+                          baseOffset: 0, extentOffset: textLength);
+                      return AutoSizeTextField(
+                        controller: fieldTextEditingController,
+                        focusNode: fieldFocusNode,
+                        minFontSize: 18,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        keyboardType: TextInputType.visiblePassword,
+                        // keyboardType: TextInputType.number,
+                        onChanged: (String text) {
+                          _idController.id = text;
+                        },
+                        style: const TextStyle(
+                          fontFamily: 'WorkSans',
+                          fontWeight: FontWeight.bold,
+                          fontSize: 30,
+                          color: MyTheme.idColor,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: translate('Remote ID'),
+                          // hintText: 'Enter your remote ID',
+                          border: InputBorder.none,
+                          helperStyle: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            color: MyTheme.darkGray,
+                          ),
+                          labelStyle: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                            letterSpacing: 0.2,
+                            color: MyTheme.darkGray,
+                          ),
+                        ),
+                        inputFormatters: [IDTextInputFormatter()],
+                        onSubmitted: (_) {
+                          onConnect();
+                        },
+                      );
                     },
                     onSelected: (option) {
                       setState(() {
@@ -253,32 +260,59 @@ class _ConnectionPageState extends State<ConnectionPage> {
                         FocusScope.of(context).unfocus();
                       });
                     },
-                    optionsViewBuilder: (BuildContext context, AutocompleteOnSelected<Peer> onSelected, Iterable<Peer> options) {
+                    optionsViewBuilder: (BuildContext context,
+                        AutocompleteOnSelected<Peer> onSelected,
+                        Iterable<Peer> options) {
                       double maxHeight = options.length * 50;
-                      maxHeight = maxHeight > 200 ? 200 : maxHeight;
+                      if (options.length == 1) {
+                        maxHeight = 52;
+                      } else if (options.length == 3) {
+                        maxHeight = 146;
+                      } else if (options.length == 4) {
+                        maxHeight = 193;
+                      }
+                      maxHeight = maxHeight.clamp(0, 200);
                       return Align(
-                        alignment: Alignment.topLeft,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(5),
-                          child: Material(
-                          elevation: 4,
-                          child: ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxHeight: maxHeight,
-                              maxWidth: 320,
-                            ),
-                              child: peers.isEmpty && isPeersLoading
-                              ? Container(
-                                    height: 80,
-                                     child: Center( 
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      )))
-                              : ListView(
-                              padding: EdgeInsets.only(top: 5),
-                              children: options.map((peer) => AutocompletePeerTile(onSelect: () => onSelected(peer), peer: peer)).toList(),
-                            ))))
-                      );
+                          alignment: Alignment.topLeft,
+                          child: Container(
+                              decoration: BoxDecoration(
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.3),
+                                    blurRadius: 5,
+                                    spreadRadius: 1,
+                                  ),
+                                ],
+                              ),
+                              child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(5),
+                                  child: Material(
+                                      elevation: 4,
+                                      child: ConstrainedBox(
+                                          constraints: BoxConstraints(
+                                            maxHeight: maxHeight,
+                                            maxWidth: 320,
+                                          ),
+                                          child: peers.isEmpty && isPeersLoading
+                                              ? Container(
+                                                  height: 80,
+                                                  child: Center(
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                    strokeWidth: 2,
+                                                  )))
+                                              : ListView(
+                                                  padding:
+                                                      EdgeInsets.only(top: 5),
+                                                  children: options
+                                                      .map((peer) =>
+                                                          AutocompletePeerTile(
+                                                              onSelect: () =>
+                                                                  onSelected(
+                                                                      peer),
+                                                              peer: peer))
+                                                      .toList(),
+                                                ))))));
                     },
                   ),
                 ),
@@ -320,75 +354,5 @@ class _ConnectionPageState extends State<ConnectionPage> {
       Get.delete<IDTextEditingController>();
     }
     super.dispose();
-  }
-}
-
-class WebMenu extends StatefulWidget {
-  const WebMenu({Key? key}) : super(key: key);
-
-  @override
-  State<WebMenu> createState() => _WebMenuState();
-}
-
-class _WebMenuState extends State<WebMenu> {
-  @override
-  Widget build(BuildContext context) {
-    Provider.of<FfiModel>(context);
-    return PopupMenuButton<String>(
-        tooltip: "",
-        icon: const Icon(Icons.more_vert),
-        itemBuilder: (context) {
-          return (isIOS
-                  ? [
-                      const PopupMenuItem(
-                        value: "scan",
-                        child: Icon(Icons.qr_code_scanner, color: Colors.black),
-                      )
-                    ]
-                  : <PopupMenuItem<String>>[]) +
-              [
-                PopupMenuItem(
-                  value: "server",
-                  child: Text(translate('ID/Relay Server')),
-                )
-              ] +
-              [
-                PopupMenuItem(
-                  value: "login",
-                  child: Text(gFFI.userModel.userName.value.isEmpty
-                      ? translate("Login")
-                      : '${translate("Logout")} (${gFFI.userModel.userName.value})'),
-                )
-              ] +
-              [
-                PopupMenuItem(
-                  value: "about",
-                  child: Text('${translate('About')} RustDesk'),
-                )
-              ];
-        },
-        onSelected: (value) {
-          if (value == 'server') {
-            showServerSettings(gFFI.dialogManager);
-          }
-          if (value == 'about') {
-            showAbout(gFFI.dialogManager);
-          }
-          if (value == 'login') {
-            if (gFFI.userModel.userName.value.isEmpty) {
-              loginDialog();
-            } else {
-              logOutConfirmDialog();
-            }
-          }
-          if (value == 'scan') {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (BuildContext context) => ScanPage(),
-              ),
-            );
-          }
-        });
   }
 }

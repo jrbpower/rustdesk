@@ -1,5 +1,5 @@
 use crate::android::ffi::*;
-use crate::Pixfmt;
+use crate::{Frame, Pixfmt};
 use lazy_static::lazy_static;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::{io, time::Duration};
 
 lazy_static! {
-    static ref SCREEN_SIZE: Mutex<(u16, u16, u16)> = Mutex::new((0, 0, 0)); // (width, height, scale)
+   pub(crate)  static ref SCREEN_SIZE: Mutex<(u16, u16, u16)> = Mutex::new((0, 0, 0)); // (width, height, scale)
 }
 
 pub struct Capturer {
@@ -36,33 +36,31 @@ impl Capturer {
 
 impl crate::TraitCapturer for Capturer {
     fn frame<'a>(&'a mut self, _timeout: Duration) -> io::Result<Frame<'a>> {
-        if let Some(buf) = get_video_raw() {
-            crate::would_block_if_equal(&mut self.saved_raw_data, buf)?;
-            // Is it safe to directly return buf without copy?
-            self.rgba.resize(buf.len(), 0);
-            unsafe {
-                std::ptr::copy_nonoverlapping(buf.as_ptr(), self.rgba.as_mut_ptr(), buf.len())
-            };
-            Ok(Frame::new(&self.rgba, self.width(), self.height()))
+        if get_video_raw(&mut self.rgba, &mut self.saved_raw_data).is_some() {
+            Ok(Frame::PixelBuffer(PixelBuffer::new(
+                &self.rgba,
+                self.width(),
+                self.height(),
+            )))
         } else {
             return Err(io::ErrorKind::WouldBlock.into());
         }
     }
 }
 
-pub struct Frame<'a> {
+pub struct PixelBuffer<'a> {
     data: &'a [u8],
     width: usize,
     height: usize,
     stride: Vec<usize>,
 }
 
-impl<'a> Frame<'a> {
+impl<'a> PixelBuffer<'a> {
     pub fn new(data: &'a [u8], width: usize, height: usize) -> Self {
         let stride0 = data.len() / height;
         let mut stride = Vec::new();
         stride.push(stride0);
-        Frame {
+        PixelBuffer {
             data,
             width,
             height,
@@ -71,7 +69,7 @@ impl<'a> Frame<'a> {
     }
 }
 
-impl<'a> crate::TraitFrame for Frame<'a> {
+impl<'a> crate::TraitPixelBuffer for PixelBuffer<'a> {
     fn data(&self) -> &[u8] {
         self.data
     }
@@ -183,4 +181,9 @@ fn get_size() -> Option<(u16, u16, u16)> {
         }
     }
     None
+}
+
+pub fn is_start() -> Option<bool> {
+    let res = call_main_service_get_by_name("is_start").ok()?;
+    Some(res == "true")
 }

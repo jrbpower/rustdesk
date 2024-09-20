@@ -8,7 +8,7 @@ use hbb_common::message_proto::{Chroma, EncodedVideoFrame, EncodedVideoFrames, V
 use hbb_common::ResultType;
 
 use crate::codec::{base_bitrate, codec_thread_num, EncoderApi, Quality};
-use crate::{EncodeYuvFormat, GoogleImage, Pixfmt, STRIDE_ALIGN};
+use crate::{EncodeInput, EncodeYuvFormat, GoogleImage, Pixfmt, STRIDE_ALIGN};
 
 use super::vpx::{vp8e_enc_control_id::*, vpx_codec_err_t::*, *};
 use crate::{generate_call_macro, generate_call_ptr_macro, Error, Result};
@@ -73,7 +73,7 @@ impl EncoderApi for VpxEncoder {
                 // When the data buffer falls below this percentage of fullness, a dropped frame is indicated. Set the threshold to zero (0) to disable this feature.
                 // In dynamic scenes, low bitrate gets low fps while high bitrate gets high fps.
                 c.rc_dropframe_thresh = 25;
-                c.g_threads = codec_thread_num() as _;
+                c.g_threads = codec_thread_num(64) as _;
                 c.g_error_resilient = VPX_ERROR_RESILIENT_DEFAULT;
                 // https://developers.google.com/media/vp9/bitrate-modes/
                 // Constant Bitrate mode (CBR) is recommended for live streaming with VP9.
@@ -183,10 +183,10 @@ impl EncoderApi for VpxEncoder {
         }
     }
 
-    fn encode_to_message(&mut self, frame: &[u8], ms: i64) -> ResultType<VideoFrame> {
+    fn encode_to_message(&mut self, input: EncodeInput, ms: i64) -> ResultType<VideoFrame> {
         let mut frames = Vec::new();
         for ref frame in self
-            .encode(ms, frame, STRIDE_ALIGN)
+            .encode(ms, input.yuv()?, STRIDE_ALIGN)
             .with_context(|| "Failed to encode")?
         {
             frames.push(VpxEncoder::create_frame(frame));
@@ -205,6 +205,11 @@ impl EncoderApi for VpxEncoder {
 
     fn yuvfmt(&self) -> crate::EncodeYuvFormat {
         self.yuvfmt.clone()
+    }
+
+    #[cfg(feature = "vram")]
+    fn input_texture(&self) -> bool {
+        false
     }
 
     fn set_quality(&mut self, quality: Quality) -> ResultType<()> {
@@ -226,6 +231,23 @@ impl EncoderApi for VpxEncoder {
         let c = unsafe { *self.ctx.config.enc.to_owned() };
         c.rc_target_bitrate
     }
+
+    fn support_abr(&self) -> bool {
+        true
+    }
+    fn support_changing_quality(&self) -> bool {
+        true
+    }
+
+    fn latency_free(&self) -> bool {
+        true
+    }
+
+    fn is_hardware(&self) -> bool {
+        false
+    }
+
+    fn disable(&self) {}
 }
 
 impl VpxEncoder {
@@ -450,7 +472,7 @@ impl VpxDecoder {
         };
         let mut ctx = Default::default();
         let cfg = vpx_codec_dec_cfg_t {
-            threads: codec_thread_num() as _,
+            threads: codec_thread_num(64) as _,
             w: 0,
             h: 0,
         };

@@ -8,7 +8,9 @@ use hbb_common::{
     tokio::{self, sync::mpsc},
     ResultType,
 };
-use scrap::{Capturer, Frame, TraitCapturer, TraitFrame};
+#[cfg(feature = "vram")]
+use scrap::AdapterDevice;
+use scrap::{Capturer, Frame, TraitCapturer, TraitPixelBuffer};
 use shared_memory::*;
 use std::{
     mem::size_of,
@@ -89,7 +91,7 @@ impl SharedMemory {
                 bail!("Unable to create shmem flink {} : {}", flink, e);
             }
         };
-        log::info!("Create shared memory, size:{}, flink:{}", size, flink);
+        log::info!("Create shared memory, size: {}, flink: {}", size, flink);
         set_path_permission(&PathBuf::from(flink), "F").ok();
         Ok(SharedMemory { inner: shmem })
     }
@@ -102,7 +104,7 @@ impl SharedMemory {
                 bail!("Unable to open existing shmem flink {} : {}", flink, e);
             }
         };
-        log::info!("open existing shared memory, flink:{:?}", flink);
+        log::info!("open existing shared memory, flink: {:?}", flink);
         Ok(SharedMemory { inner: shmem })
     }
 
@@ -184,9 +186,10 @@ mod utils {
             let rptr = counter.add(size_of::<i32>());
             let iw = ptr_to_i32(counter);
             let ir = ptr_to_i32(counter);
-            let v = i32_to_vec(iw + 1);
+            let iw_plus1 = if iw == i32::MAX { 0 } else { iw + 1 };
+            let v = i32_to_vec(iw_plus1);
             std::ptr::copy_nonoverlapping(v.as_ptr(), wptr, size_of::<i32>());
-            if ir == iw + 1 {
+            if ir == iw_plus1 {
                 let v = i32_to_vec(iw);
                 std::ptr::copy_nonoverlapping(v.as_ptr(), rptr, size_of::<i32>());
             }
@@ -351,7 +354,7 @@ pub mod server {
                             }
                         }
                         Err(e) => {
-                            log::error!("Failed to create gdi capturer:{:?}", e);
+                            log::error!("Failed to create gdi capturer: {:?}", e);
                             std::thread::sleep(std::time::Duration::from_secs(1));
                             continue;
                         }
@@ -359,7 +362,7 @@ pub mod server {
                 } else {
                     if recreate || current_display != last_current_display {
                         log::info!(
-                            "create capturer, display:{}->{}",
+                            "create capturer, display: {} -> {}",
                             last_current_display,
                             current_display,
                         );
@@ -381,31 +384,36 @@ pub mod server {
                     }
                 }
                 match c.as_mut().map(|f| f.frame(spf)) {
-                    Some(Ok(f)) => {
-                        utils::set_frame_info(
-                            &shmem,
-                            FrameInfo {
-                                length: f.data().len(),
-                                width: display_width,
-                                height: display_height,
-                            },
-                        );
-                        shmem.write(ADDR_CAPTURE_FRAME, f.data());
-                        shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
-                        utils::increase_counter(shmem.as_ptr().add(ADDR_CAPTURE_FRAME_COUNTER));
-                        first_frame_captured = true;
-                        dxgi_failed_times = 0;
-                    }
+                    Some(Ok(f)) => match f {
+                        Frame::PixelBuffer(f) => {
+                            utils::set_frame_info(
+                                &shmem,
+                                FrameInfo {
+                                    length: f.data().len(),
+                                    width: display_width,
+                                    height: display_height,
+                                },
+                            );
+                            shmem.write(ADDR_CAPTURE_FRAME, f.data());
+                            shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
+                            utils::increase_counter(shmem.as_ptr().add(ADDR_CAPTURE_FRAME_COUNTER));
+                            first_frame_captured = true;
+                            dxgi_failed_times = 0;
+                        }
+                        Frame::Texture(_) => {
+                            // should not happen
+                        }
+                    },
                     Some(Err(e)) => {
+                        if crate::platform::windows::desktop_changed() {
+                            crate::platform::try_change_desktop();
+                            c = None;
+                            std::thread::sleep(spf);
+                            continue;
+                        }
                         if e.kind() != std::io::ErrorKind::WouldBlock {
                             // DXGI_ERROR_INVALID_CALL after each success on Microsoft GPU driver
-                            // log::error!("capture frame failed:{:?}", e);
-                            if crate::platform::windows::desktop_changed() {
-                                crate::platform::try_change_desktop();
-                                c = None;
-                                std::thread::sleep(spf);
-                                continue;
-                            }
+                            // log::error!("capture frame failed: {:?}", e);
                             if c.as_ref().map(|c| c.is_gdi()) == Some(false) {
                                 // nog gdi
                                 dxgi_failed_times += 1;
@@ -435,7 +443,8 @@ pub mod server {
 
         match ipc::connect(1000, postfix).await {
             Ok(mut stream) => {
-                let mut timer = tokio::time::interval(Duration::from_secs(1));
+                let mut timer =
+                    crate::rustdesk_interval(tokio::time::interval(Duration::from_secs(1)));
                 let mut nack = 0;
                 loop {
                     tokio::select! {
@@ -500,7 +509,7 @@ pub mod server {
                 }
             }
             Err(e) => {
-                log::error!("Failed to connect portable service ipc:{:?}", e);
+                log::error!("Failed to connect portable service ipc: {:?}", e);
             }
         }
 
@@ -510,11 +519,10 @@ pub mod server {
 
 // functions called in main process.
 pub mod client {
-    use hbb_common::{anyhow::Context, message_proto::PointerDeviceEvent};
-
-    use crate::display_service;
-
     use super::*;
+    use crate::display_service;
+    use hbb_common::{anyhow::Context, message_proto::PointerDeviceEvent};
+    use scrap::PixelBuffer;
 
     lazy_static::lazy_static! {
         static ref RUNNING: Arc<Mutex<bool>> = Default::default();
@@ -541,9 +549,13 @@ pub mod client {
             let mut max_pixel = 0;
             let align = 64;
             for d in displays {
-                let pixel = utils::align(d.width(), align) * utils::align(d.height(), align);
-                if max_pixel < pixel {
-                    max_pixel = pixel;
+                let resolutions = crate::platform::resolutions(&d.name());
+                for r in resolutions {
+                    let pixel =
+                        utils::align(r.width as _, align) * utils::align(r.height as _, align);
+                    if max_pixel < pixel {
+                        max_pixel = pixel;
+                    }
                 }
             }
             let shmem_size = utils::align(ADDR_CAPTURE_FRAME + max_pixel * 4, align);
@@ -618,10 +630,11 @@ pub mod client {
     }
 
     pub extern "C" fn drop_portable_service_shared_memory() {
+        // https://stackoverflow.com/questions/35980148/why-does-an-atexit-handler-panic-when-it-accesses-stdout
+        // Please make sure there is no print in the call stack
         let mut lock = SHMEM.lock().unwrap();
         if lock.is_some() {
             *lock = None;
-            log::info!("drop shared memory");
         }
     }
 
@@ -704,7 +717,11 @@ pub mod client {
                     }
                     let frame_ptr = base.add(ADDR_CAPTURE_FRAME);
                     let data = slice::from_raw_parts(frame_ptr, (*frame_info).length);
-                    Ok(Frame::new(data, self.width, self.height))
+                    Ok(Frame::PixelBuffer(PixelBuffer::new(
+                        data,
+                        self.width,
+                        self.height,
+                    )))
                 } else {
                     let ptr = base.add(ADDR_CAPTURE_WOULDBLOCK);
                     let wouldblock = utils::ptr_to_i32(ptr);
@@ -731,6 +748,14 @@ pub mod client {
         fn set_gdi(&mut self) -> bool {
             true
         }
+
+        #[cfg(feature = "vram")]
+        fn device(&self) -> AdapterDevice {
+            AdapterDevice::default()
+        }
+
+        #[cfg(feature = "vram")]
+        fn set_output_texture(&mut self, _texture: bool) {}
     }
 
     pub(super) fn start_ipc_server() -> mpsc::UnboundedSender<Data> {
@@ -758,7 +783,7 @@ pub mod client {
                                     tokio::spawn(async move {
                                         let mut stream = Connection::new(stream);
                                         let postfix = postfix.to_owned();
-                                        let mut timer = tokio::time::interval(Duration::from_secs(1));
+                                        let mut timer = crate::rustdesk_interval(tokio::time::interval(Duration::from_secs(1)));
                                         let mut nack = 0;
                                         let mut rx = rx_clone.lock().await;
                                         loop {
@@ -875,17 +900,9 @@ pub mod client {
         if portable_service_running != RUNNING.lock().unwrap().clone() {
             log::info!("portable service status mismatch");
         }
-        if portable_service_running {
+        if portable_service_running && display.is_primary() {
             log::info!("Create shared memory capturer");
-            if current_display == *display_service::PRIMARY_DISPLAY_IDX {
-                return Ok(Box::new(CapturerPortable::new(current_display)));
-            } else {
-                bail!(
-                    "Ignore capture display index: {}, the primary display index is: {}",
-                    current_display,
-                    *display_service::PRIMARY_DISPLAY_IDX
-                );
-            }
+            return Ok(Box::new(CapturerPortable::new(current_display)));
         } else {
             log::debug!("Create capturer dxgi|gdi");
             return Ok(Box::new(

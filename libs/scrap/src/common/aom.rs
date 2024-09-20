@@ -9,7 +9,7 @@ include!(concat!(env!("OUT_DIR"), "/aom_ffi.rs"));
 use crate::codec::{base_bitrate, codec_thread_num, Quality};
 use crate::{codec::EncoderApi, EncodeFrame, STRIDE_ALIGN};
 use crate::{common::GoogleImage, generate_call_macro, generate_call_ptr_macro, Error, Result};
-use crate::{EncodeYuvFormat, Pixfmt};
+use crate::{EncodeInput, EncodeYuvFormat, Pixfmt};
 use hbb_common::{
     anyhow::{anyhow, Context},
     bytes::Bytes,
@@ -106,7 +106,7 @@ mod webrtc {
         // Overwrite default config with input encoder settings & RTC-relevant values.
         c.g_w = cfg.width;
         c.g_h = cfg.height;
-        c.g_threads = codec_thread_num() as _;
+        c.g_threads = codec_thread_num(64) as _;
         c.g_timebase.num = 1;
         c.g_timebase.den = kRtpTicksPerSecond;
         c.g_input_bit_depth = kBitDepth;
@@ -249,10 +249,10 @@ impl EncoderApi for AomEncoder {
         }
     }
 
-    fn encode_to_message(&mut self, frame: &[u8], ms: i64) -> ResultType<VideoFrame> {
+    fn encode_to_message(&mut self, input: EncodeInput, ms: i64) -> ResultType<VideoFrame> {
         let mut frames = Vec::new();
         for ref frame in self
-            .encode(ms, frame, STRIDE_ALIGN)
+            .encode(ms, input.yuv()?, STRIDE_ALIGN)
             .with_context(|| "Failed to encode")?
         {
             frames.push(Self::create_frame(frame));
@@ -266,6 +266,11 @@ impl EncoderApi for AomEncoder {
 
     fn yuvfmt(&self) -> crate::EncodeYuvFormat {
         self.yuvfmt.clone()
+    }
+
+    #[cfg(feature = "vram")]
+    fn input_texture(&self) -> bool {
+        false
     }
 
     fn set_quality(&mut self, quality: Quality) -> ResultType<()> {
@@ -287,6 +292,24 @@ impl EncoderApi for AomEncoder {
         let c = unsafe { *self.ctx.config.enc.to_owned() };
         c.rc_target_bitrate
     }
+
+    fn support_abr(&self) -> bool {
+        true
+    }
+
+    fn support_changing_quality(&self) -> bool {
+        true
+    }
+
+    fn latency_free(&self) -> bool {
+        true
+    }
+
+    fn is_hardware(&self) -> bool {
+        false
+    }
+
+    fn disable(&self) {}
 }
 
 impl AomEncoder {
@@ -452,7 +475,7 @@ impl AomDecoder {
         let i = call_aom_ptr!(aom_codec_av1_dx());
         let mut ctx = Default::default();
         let cfg = aom_codec_dec_cfg_t {
-            threads: codec_thread_num() as _,
+            threads: codec_thread_num(64) as _,
             w: 0,
             h: 0,
             allow_lowbitdepth: 1,
