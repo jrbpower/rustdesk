@@ -175,6 +175,22 @@ impl LockModesHandler {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn sleep_to_ensure_locked(v: bool, k: enigo::Key, en: &mut Enigo) {
+        if wayland_use_uinput() {
+            // Sleep at most 500ms to ensure the lock state is applied.
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                if en.get_key_state(k) == v {
+                    break;
+                }
+            }
+        } else if wayland_use_rdp_input() {
+            // We can't call `en.get_key_state(k)` because there's no api for this.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn new(key_event: &KeyEvent, is_numpad_key: bool) -> Self {
         let mut en = ENIGO.lock().unwrap();
@@ -183,12 +199,15 @@ impl LockModesHandler {
         let caps_lock_changed = event_caps_enabled != local_caps_enabled;
         if caps_lock_changed {
             en.key_click(enigo::Key::CapsLock);
+            #[cfg(target_os = "linux")]
+            Self::sleep_to_ensure_locked(event_caps_enabled, enigo::Key::CapsLock, &mut en);
         }
 
         let mut num_lock_changed = false;
+        let mut event_num_enabled = false;
         if is_numpad_key {
             let local_num_enabled = en.get_key_state(enigo::Key::NumLock);
-            let event_num_enabled = Self::is_modifier_enabled(key_event, ControlKey::NumLock);
+            event_num_enabled = Self::is_modifier_enabled(key_event, ControlKey::NumLock);
             num_lock_changed = event_num_enabled != local_num_enabled;
         } else if is_legacy_mode(key_event) {
             #[cfg(target_os = "windows")]
@@ -199,6 +218,8 @@ impl LockModesHandler {
         }
         if num_lock_changed {
             en.key_click(enigo::Key::NumLock);
+            #[cfg(target_os = "linux")]
+            Self::sleep_to_ensure_locked(event_num_enabled, enigo::Key::NumLock, &mut en);
         }
 
         Self {
@@ -236,6 +257,14 @@ impl LockModesHandler {
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 impl Drop for LockModesHandler {
     fn drop(&mut self) {
+        // Do not change led state if is Wayland uinput.
+        // Because there must be a delay to ensure the lock state is applied on Wayland uinput,
+        // which may affect the user experience.
+        #[cfg(target_os = "linux")]
+        if wayland_use_uinput() {
+            return;
+        }
+
         let mut en = ENIGO.lock().unwrap();
         if self.caps_lock_changed {
             en.key_click(enigo::Key::CapsLock);
@@ -424,6 +453,26 @@ const MOUSE_ACTIVE_DISTANCE: i32 = 5;
 
 static RECORD_CURSOR_POS_RUNNING: AtomicBool = AtomicBool::new(false);
 
+// https://github.com/rustdesk/rustdesk/issues/9729
+// We need to do some special handling for macOS when using the legacy mode.
+#[cfg(target_os = "macos")]
+static LAST_KEY_LEGACY_MODE: AtomicBool = AtomicBool::new(true);
+// We use enigo to
+// 1. Simulate mouse events
+// 2. Simulate the legacy mode key events
+// 3. Simulate the functioin key events, like LockScreen
+#[inline]
+#[cfg(target_os = "macos")]
+fn enigo_ignore_flags() -> bool {
+    !LAST_KEY_LEGACY_MODE.load(Ordering::SeqCst)
+}
+#[inline]
+#[cfg(target_os = "macos")]
+fn set_last_legacy_mode(v: bool) {
+    LAST_KEY_LEGACY_MODE.store(v, Ordering::SeqCst);
+    ENIGO.lock().unwrap().set_ignore_flags(!v);
+}
+
 pub fn try_start_record_cursor_pos() -> Option<thread::JoinHandle<()>> {
     if RECORD_CURSOR_POS_RUNNING.load(Ordering::SeqCst) {
         return None;
@@ -452,8 +501,13 @@ pub fn try_start_record_cursor_pos() -> Option<thread::JoinHandle<()>> {
 }
 
 pub fn try_stop_record_cursor_pos() {
-    let count_lock = CONN_COUNT.lock().unwrap();
-    if *count_lock > 0 {
+    let remote_count = AUTHED_CONNS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.conn_type == AuthConnType::Remote)
+        .count();
+    if remote_count > 0 {
         return;
     }
     RECORD_CURSOR_POS_RUNNING.store(false, Ordering::SeqCst);
@@ -476,6 +530,19 @@ impl VirtualInputState {
     fn new() -> Option<Self> {
         VirtualInput::new(
             CGEventSourceStateID::CombinedSessionState,
+            // Note: `CGEventTapLocation::Session` will be affected by the mouse events.
+            // When we're simulating key events, then move the physical mouse, the key events will be affected.
+            // It looks like https://github.com/rustdesk/rustdesk/issues/9729#issuecomment-2432306822
+            // 1. Press "Command" key in RustDesk
+            // 2. Move the physical mouse
+            // 3. Press "V" key in RustDesk
+            // Then the controlled side just prints "v" instead of pasting.
+            //
+            // Changing `CGEventTapLocation::Session` to `CGEventTapLocation::HID` fixes it.
+            // But we do not consider this as a bug, because it's not a common case,
+            // we consider only RustDesk operates the controlled side.
+            //
+            // https://developer.apple.com/documentation/coregraphics/cgeventtaplocation/
             CGEventTapLocation::Session,
         )
         .map(|virtual_input| Self {
@@ -597,10 +664,20 @@ fn is_pressed(key: &Key, en: &mut Enigo) -> bool {
     get_modifier_state(key.clone(), en)
 }
 
+// Sleep for 8ms is enough in my tests, but we sleep 12ms to be safe.
+// sleep 12ms In my test, the characters are already output in real time.
 #[inline]
 #[cfg(target_os = "macos")]
 fn key_sleep() {
-    std::thread::sleep(Duration::from_millis(20));
+    // https://www.reddit.com/r/rustdesk/comments/1kn1w5x/typing_lags_when_connecting_to_macos_clients/
+    //
+    // There's a strange bug when running by `launchctl load -w /Library/LaunchAgents/abc.plist`
+    // `std::thread::sleep(Duration::from_millis(20));` may sleep 90ms or more.
+    // Though `/Applications/RustDesk.app/Contents/MacOS/rustdesk --server` in terminal is ok.
+    let now = Instant::now();
+    while now.elapsed() < Duration::from_millis(12) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[inline]
@@ -624,8 +701,8 @@ fn get_modifier_state(key: Key, en: &mut Enigo) -> bool {
 
 pub fn handle_mouse(evt: &MouseEvent, conn: i32) {
     #[cfg(target_os = "macos")]
-    if !is_server() {
-        // having GUI, run main GUI thread, otherwise crash
+    {
+        // having GUI (--server has tray, it is GUI too), run main GUI thread, otherwise crash
         let evt = evt.clone();
         QUEUE.exec_async(move || handle_mouse_(&evt, conn));
         return;
@@ -639,7 +716,7 @@ pub fn handle_mouse(evt: &MouseEvent, conn: i32) {
 // to-do: merge handle_mouse and handle_pointer
 pub fn handle_pointer(evt: &PointerDeviceEvent, conn: i32) {
     #[cfg(target_os = "macos")]
-    if !is_server() {
+    {
         // having GUI, run main GUI thread, otherwise crash
         let evt = evt.clone();
         QUEUE.exec_async(move || handle_pointer_(&evt, conn));
@@ -916,6 +993,8 @@ pub fn handle_mouse_(evt: &MouseEvent, conn: i32) {
     let buttons = evt.mask >> 3;
     let evt_type = evt.mask & 0x7;
     let mut en = ENIGO.lock().unwrap();
+    #[cfg(target_os = "macos")]
+    en.set_ignore_flags(enigo_ignore_flags());
     #[cfg(not(target_os = "macos"))]
     let mut to_release = Vec::new();
     if evt_type == MOUSE_TYPE_DOWN {
@@ -1122,6 +1201,13 @@ pub fn handle_key(evt: &KeyEvent) {
     // having GUI, run main GUI thread, otherwise crash
     let evt = evt.clone();
     QUEUE.exec_async(move || handle_key_(&evt));
+    // Key sleep is required for macOS.
+    // If we don't sleep, the key press/release events may not take effect.
+    //
+    // For example, the controlled side osx `12.7.6` or `15.1.1`
+    // If we input characters quickly and continuously, and press or release "Shift" for a short period of time,
+    // it is possible that after releasing "Shift", the controlled side will still print uppercase characters.
+    // Though it is not very easy to reproduce.
     key_sleep();
 }
 
@@ -1136,11 +1222,7 @@ fn reset_input() {
 
 #[cfg(target_os = "macos")]
 pub fn reset_input_ondisconn() {
-    if !is_server() {
-        QUEUE.exec_async(reset_input);
-    } else {
-        reset_input();
-    }
+    QUEUE.exec_async(reset_input);
 }
 
 fn sim_rdev_rawkey_position(code: KeyCode, keydown: bool) {
@@ -1638,16 +1720,24 @@ pub fn handle_key_(evt: &KeyEvent) {
             }
         }
         _ => {}
-    };
+    }
 
     match evt.mode.enum_value() {
         Ok(KeyboardMode::Map) => {
+            #[cfg(target_os = "macos")]
+            set_last_legacy_mode(false);
             map_keyboard_mode(evt);
         }
         Ok(KeyboardMode::Translate) => {
+            #[cfg(target_os = "macos")]
+            set_last_legacy_mode(false);
             translate_keyboard_mode(evt);
         }
         _ => {
+            // All key down events are started from here,
+            // so we can reset the flag of last legacy mode here.
+            #[cfg(target_os = "macos")]
+            set_last_legacy_mode(true);
             legacy_keyboard_mode(evt);
         }
     }

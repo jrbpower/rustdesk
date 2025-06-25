@@ -48,20 +48,26 @@ class PlatformFFI {
 
   static get isMain => instance._appType == kAppTypeMain;
 
+  static String getByName(String name, [String arg = '']) {
+    return '';
+  }
+
+  static void setByName(String name, [String value = '']) {}
+
   static Future<String> getVersion() async {
     PackageInfo packageInfo = await PackageInfo.fromPlatform();
     return packageInfo.version;
   }
 
   bool registerEventHandler(
-      String eventName, String handlerName, HandleEvent handler) {
+      String eventName, String handlerName, HandleEvent handler, {bool replace = false}) {
     debugPrint('registerEventHandler $eventName $handlerName');
     var handlers = _eventHandlers[eventName];
     if (handlers == null) {
       _eventHandlers[eventName] = {handlerName: handler};
       return true;
     } else {
-      if (handlers.containsKey(handlerName)) {
+      if (!replace && handlers.containsKey(handlerName)) {
         return false;
       } else {
         handlers[handlerName] = handler;
@@ -276,4 +282,6 @@ class PlatformFFI {
   void syncAndroidServiceAppDirConfigPath() {
     invokeMethod(AndroidChannel.kSyncAppDirConfigPath, _dir);
   }
+
+  void setFullscreenCallback(void Function(bool) fun) {}
 }

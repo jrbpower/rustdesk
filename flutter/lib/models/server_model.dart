@@ -30,11 +30,13 @@ class ServerModel with ChangeNotifier {
   bool _inputOk = false;
   bool _audioOk = false;
   bool _fileOk = false;
+  bool _clipboardOk = false;
   bool _showElevation = false;
   bool hideCm = false;
   int _connectStatus = 0; // Rendezvous Server status
   String _verificationMethod = "";
   String _temporaryPasswordLength = "";
+  bool _allowNumericOneTimePassword = false;
   String _approveMode = "";
   int _zeroClientLengthCounter = 0;
 
@@ -58,6 +60,8 @@ class ServerModel with ChangeNotifier {
   bool get audioOk => _audioOk;
 
   bool get fileOk => _fileOk;
+
+  bool get clipboardOk => _clipboardOk;
 
   bool get showElevation => _showElevation;
 
@@ -107,6 +111,12 @@ class ServerModel with ChangeNotifier {
           key: 'allow-hide-cm', value: bool2option('allow-hide-cm', false));
     }
     */
+  }
+
+  bool get allowNumericOneTimePassword => _allowNumericOneTimePassword;
+  switchAllowNumericOneTimePassword() async {
+    await mainSetBoolOption(
+        kOptionAllowNumericOneTimePassword, !_allowNumericOneTimePassword);
   }
 
   TextEditingController get serverId => _serverId;
@@ -209,6 +219,10 @@ class ServerModel with ChangeNotifier {
       _fileOk = fileOption != 'N';
     }
 
+    // clipboard
+    final clipOption = await bind.mainGetOption(key: kOptionEnableClipboard);
+    _clipboardOk = clipOption != 'N';
+
     notifyListeners();
   }
 
@@ -220,6 +234,8 @@ class ServerModel with ChangeNotifier {
     final temporaryPasswordLength =
         await bind.mainGetOption(key: "temporary-password-length");
     final approveMode = await bind.mainGetOption(key: kOptionApproveMode);
+    final numericOneTimePassword =
+        await mainGetBoolOption(kOptionAllowNumericOneTimePassword);
     /*
     var hideCm = option2bool(
         'allow-hide-cm', await bind.mainGetOption(key: 'allow-hide-cm'));
@@ -256,6 +272,10 @@ class ServerModel with ChangeNotifier {
         bind.mainUpdateTemporaryPassword();
       }
       _temporaryPasswordLength = temporaryPasswordLength;
+      update = true;
+    }
+    if (_allowNumericOneTimePassword != numericOneTimePassword) {
+      _allowNumericOneTimePassword = numericOneTimePassword;
       update = true;
     }
     /*
@@ -312,6 +332,14 @@ class ServerModel with ChangeNotifier {
     bind.mainSetOption(
         key: kOptionEnableFileTransfer,
         value: _fileOk ? defaultOptionYes : 'N');
+    notifyListeners();
+  }
+
+  toggleClipboard() async {
+    _clipboardOk = !clipboardOk;
+    bind.mainSetOption(
+        key: kOptionEnableClipboard,
+        value: clipboardOk ? defaultOptionYes : 'N');
     notifyListeners();
   }
 
@@ -776,6 +804,7 @@ class ServerModel with ChangeNotifier {
 enum ClientType {
   remote,
   file,
+  camera,
   portForward,
 }
 
@@ -783,6 +812,7 @@ class Client {
   int id = 0; // client connections inner count id
   bool authorized = false;
   bool isFileTransfer = false;
+  bool isViewCamera = false;
   String portForward = "";
   String name = "";
   String peerId = ""; // peer user's id,show at app
@@ -800,13 +830,15 @@ class Client {
 
   RxInt unreadChatMessageCount = 0.obs;
 
-  Client(this.id, this.authorized, this.isFileTransfer, this.name, this.peerId,
-      this.keyboard, this.clipboard, this.audio);
+  Client(this.id, this.authorized, this.isFileTransfer, this.isViewCamera,
+      this.name, this.peerId, this.keyboard, this.clipboard, this.audio);
 
   Client.fromJson(Map<String, dynamic> json) {
     id = json['id'];
     authorized = json['authorized'];
     isFileTransfer = json['is_file_transfer'];
+    // TODO: no entry then default.
+    isViewCamera = json['is_view_camera'];
     portForward = json['port_forward'];
     name = json['name'];
     peerId = json['peer_id'];
@@ -828,6 +860,7 @@ class Client {
     data['id'] = id;
     data['authorized'] = authorized;
     data['is_file_transfer'] = isFileTransfer;
+    data['is_view_camera'] = isViewCamera;
     data['port_forward'] = portForward;
     data['name'] = name;
     data['peer_id'] = peerId;
@@ -848,6 +881,8 @@ class Client {
   ClientType type_() {
     if (isFileTransfer) {
       return ClientType.file;
+    } else if (isViewCamera) {
+      return ClientType.camera;
     } else if (portForward.isNotEmpty) {
       return ClientType.portForward;
     } else {
