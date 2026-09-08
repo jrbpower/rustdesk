@@ -1,4 +1,4 @@
-name: Gerar APK RustDesk
+name: GISuporte - Gerar APK Android
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ jobs:
     uses: ./.github/workflows/bridge.yml
 
   build-android-arm64:
-    name: APK Android ARM64
+    name: GISuporte APK ARM64
     needs: [generate-bridge]
     runs-on: ubuntu-24.04
 
@@ -39,6 +39,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Aplicar branding e servidor GISuporte
+        shell: bash
+        run: |
+          python3 -m pip install --disable-pip-version-check pillow
+          python3 res/gisuporte_branding.py
+          grep -n "GISuporte" flutter/android/app/src/main/AndroidManifest.xml
+          grep -n "191.252.210.203" src/flutter_ffi.rs
 
       - name: Instalar dependencias
         run: |
@@ -104,7 +112,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: rustdesk-lib-cache-android
+          prefix-key: gisuporte-lib-cache-android
           key: aarch64-linux-android
 
       - name: Compilar librustdesk.so
@@ -128,18 +136,20 @@ jobs:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
         run: |
           export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
+          # APK instalavel para testes sem exigir segredo de assinatura.
+          # Para distribuicao oficial, substituiremos pela sua chave JKS em GitHub Secrets.
           sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
           pushd flutter
           flutter build apk --release --target-platform android-arm64 --split-per-abi
           popd
           mkdir -p ./artifacts
           cp ./flutter/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
-             ./artifacts/rustdesk-${{ env.VERSION }}-arm64.apk
+             ./artifacts/GISuporte-${{ env.VERSION }}-arm64.apk
 
       - name: Publicar APK como artefato
         uses: actions/upload-artifact@v4
         with:
-          name: rustdesk-${{ env.VERSION }}-arm64-apk
-          path: ./artifacts/rustdesk-${{ env.VERSION }}-arm64.apk
+          name: GISuporte-${{ env.VERSION }}-Android-ARM64
+          path: ./artifacts/GISuporte-${{ env.VERSION }}-arm64.apk
           if-no-files-found: error
           retention-days: 30
