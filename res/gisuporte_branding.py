@@ -6,7 +6,7 @@ import io
 APP_NAME = "GISuporte"
 SERVER = "191.252.210.203"
 KEY = "aUbDo6Map3oFCVpb9VB66sNTbuvz3bX3iCoKVBGVUe4="
-CUSTOM_CONFIG = f"host={SERVER},key={KEY}"
+CUSTOM_CONFIG = f"host={SERVER},key={KEY},relay={SERVER}"
 
 
 def replace_required(path: Path, old: str, new: str) -> None:
@@ -89,7 +89,7 @@ def main() -> None:
     configure_server()
     brand_flutter_ui()
     generate_icons()
-    print(f"Configured {APP_NAME} for self-hosted server {SERVER}")
+    print(f"Configured {APP_NAME} ID/relay server: {SERVER}")
 
 
 if __name__ == "__main__":
