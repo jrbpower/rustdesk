@@ -1,0 +1,148 @@
+name: GISuporte - Gerar Instalador Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.75"
+  FLUTTER_VERSION: "3.24.5"
+  LLVM_VERSION: "15.0.6"
+  VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
+  VERSION: "1.4.1"
+
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  build-windows-x64:
+    name: GISuporte Windows x64
+    needs: [generate-bridge]
+    runs-on: windows-2022
+
+    steps:
+      - name: Exportar cache do GitHub Actions
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configurar Python e branding GISuporte
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pillow
+          python res/gisuporte_branding.py
+          Select-String -Path src/flutter_ffi.rs -Pattern "191.252.210.203"
+          Select-String -Path flutter/windows/runner/Runner.rc -Pattern "GISuporte"
+
+      - name: Instalar LLVM e Clang
+        uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Instalar Flutter
+        uses: subosito/flutter-action@v2.12.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Preparar engine Flutter Windows do RustDesk
+        shell: pwsh
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          Copy-Item -Path windows-x64-release\* -Destination "C:\hostedtoolcache\windows\flutter\stable-${{ env.FLUTTER_VERSION }}-x64\bin\cache\artifacts\engine\windows-x64-release\" -Recurse -Force
+
+      - name: Aplicar patch do Flutter
+        shell: bash
+        run: |
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff "$(dirname "$(dirname "$(which flutter)")")/"
+          cd "$(dirname "$(dirname "$(which flutter)")")"
+          if [ "${{ env.FLUTTER_VERSION }}" = "3.24.5" ]; then
+            git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+          fi
+
+      - name: Instalar Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: gisuporte-windows-x64
+
+      - name: Configurar vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Instalar dependencias vcpkg
+        shell: bash
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        run: |
+          if ! "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"; then
+            find "$VCPKG_ROOT" -name "*.log" -print | while read -r log; do
+              echo "===== $log ====="
+              tail -n 200 "$log" || true
+            done
+            exit 1
+          fi
+
+      - name: Restaurar bridge gerado
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Compilar GISuporte
+        shell: pwsh
+        run: |
+          python .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          if (-not (Test-Path ".\flutter\build\windows\x64\runner\Release\rustdesk.exe")) {
+            throw "rustdesk.exe nao foi gerado pelo build"
+          }
+          New-Item -ItemType Directory -Force -Path .\gisuporte | Out-Null
+          Copy-Item -Path .\flutter\build\windows\x64\runner\Release\* -Destination .\gisuporte -Recurse -Force
+          Rename-Item -Path .\gisuporte\rustdesk.exe -NewName GISuporte.exe
+
+      - name: Adicionar MSBuild ao PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Gerar MSI GISuporte
+        shell: pwsh
+        run: |
+          Push-Location .\res\msi
+          python preprocess.py --arp -d ..\..\gisuporte --app-name GISuporte --manufacturer GISuporte
+          nuget restore msi.sln
+          msbuild msi.sln -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
+          Pop-Location
+          New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
+          Copy-Item .\res\msi\Package\bin\x64\Release\en-us\Package.msi .\artifacts\GISuporte-${{ env.VERSION }}-x64.msi
+          Copy-Item .\gisuporte\GISuporte.exe .\artifacts\GISuporte-${{ env.VERSION }}-x64.exe
+
+      - name: Publicar instalador e executavel
+        uses: actions/upload-artifact@v4
+        with:
+          name: GISuporte-${{ env.VERSION }}-Windows-x64
+          path: |
+            ./artifacts/GISuporte-${{ env.VERSION }}-x64.msi
+            ./artifacts/GISuporte-${{ env.VERSION }}-x64.exe
+          if-no-files-found: error
+          retention-days: 30
