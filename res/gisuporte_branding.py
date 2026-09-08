@@ -50,6 +50,28 @@ def brand_flutter_ui() -> None:
     print(f"GISuporte branding applied to {changed} Flutter UI files")
 
 
+def brand_translations() -> None:
+    # Translation keys are API identifiers and must stay unchanged. Only the
+    # displayed value (the part after the first tuple comma) is rebranded.
+    changed_files = 0
+    changed_lines = 0
+    for path in Path("src/lang").rglob("*.rs"):
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        dirty = False
+        for i, line in enumerate(lines):
+            if "RustDesk" not in line or "," not in line:
+                continue
+            before, after = line.split(",", 1)
+            if "RustDesk" in after:
+                lines[i] = before + "," + after.replace("RustDesk", APP_NAME)
+                dirty = True
+                changed_lines += 1
+        if dirty:
+            path.write_text("".join(lines), encoding="utf-8")
+            changed_files += 1
+    print(f"GISuporte translations: {changed_lines} visible strings in {changed_files} files")
+
+
 def generate_icons() -> None:
     try:
         from PIL import Image
@@ -88,6 +110,7 @@ def generate_icons() -> None:
 def main() -> None:
     configure_server()
     brand_flutter_ui()
+    brand_translations()
     generate_icons()
     print(f"Configured {APP_NAME} ID/relay server: {SERVER}")
 
