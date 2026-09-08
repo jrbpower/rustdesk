@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/hbbs/hbbs.dart';
@@ -53,7 +52,9 @@ class AbModel {
 
   RxBool get currentAbLoading => current.abLoading;
   bool get currentAbEmpty => current.peers.isEmpty && current.tags.isEmpty;
-  RxString get currentAbPullError => current.pullError;
+  final _listPullError = ''.obs;
+  RxString get abPullError =>
+      _listPullError.value.isNotEmpty ? _listPullError : current.pullError;
   RxString get currentAbPushError => current.pushError;
   String? _personalAbGuid;
   RxBool legacyMode = false.obs;
@@ -68,6 +69,7 @@ class AbModel {
   var _syncFromRecentLock = false;
   var _timerCounter = 0;
   var _cacheLoadOnceFlag = false;
+  var _pulledOnce = false;
   var listInitialized = false;
   var _maxPeerOneAb = 0;
 
@@ -97,8 +99,15 @@ class AbModel {
     print("reset ab model");
     addressbooks.clear();
     _currentName.value = '';
+    _listPullError.value = '';
+    _pulledOnce = false;
     await bind.mainClearAb();
     listInitialized = false;
+  }
+
+  void clearPullErrors() {
+    _listPullError.value = '';
+    current.pullError.value = '';
   }
 
 // #region ab
@@ -110,39 +119,49 @@ class AbModel {
   var _pulling = false;
   Future<void> pullAb(
       {required ForcePullAb? force, required bool quiet}) async {
+    if (bind.isDisableAb()) return;
+    if (!gFFI.userModel.isLogin) return;
+    if (gFFI.userModel.networkError.isNotEmpty) return;
     if (_pulling) return;
+    if (force == null && _pulledOnce) {
+      return;
+    }
     _pulling = true;
+    if (!quiet) {
+      _listPullError.value = '';
+      current.pullError.value = '';
+    }
     try {
       await _pullAb(force: force, quiet: quiet);
       _refreshTab();
     } catch (_) {}
     _pulling = false;
+    _pulledOnce = true;
   }
 
   Future<void> _pullAb(
       {required ForcePullAb? force, required bool quiet}) async {
-    if (bind.isDisableAb()) return;
-    if (!gFFI.userModel.isLogin) return;
-    if (gFFI.userModel.networkError.isNotEmpty) return;
     if (force == null && listInitialized && current.initialized) return;
     debugPrint("pullAb, force: $force, quiet: $quiet");
     if (!listInitialized || force == ForcePullAb.listAndCurrent) {
       try {
         // Read personal guid every time to avoid upgrading the server without closing the main window
         _personalAbGuid = null;
-        await _getPersonalAbGuid();
-        // Determine legacy mode based on whether _personalAbGuid is null
+        // `true`: continue init. `false`: stop, error already recorded.
+        if (!await _getPersonalAbGuid(quiet: quiet)) {
+          return;
+        }
         legacyMode.value = _personalAbGuid == null;
         if (!legacyMode.value && _maxPeerOneAb == 0) {
-          await _getAbSettings();
+          await _getAbSettings(quiet: quiet);
         }
         if (_personalAbGuid != null) {
           debugPrint("pull ab list");
           List<AbProfile> abProfiles = List.empty(growable: true);
           abProfiles.add(AbProfile(_personalAbGuid!, _personalAddressBookName,
-              gFFI.userModel.userName.value, null, ShareRule.read.value));
+              gFFI.userModel.userName.value, null, ShareRule.read.value, null));
           // get all address book name
-          await _getSharedAbProfiles(abProfiles);
+          await _getSharedAbProfiles(abProfiles, quiet: quiet);
           addressbooks.removeWhere((key, value) =>
               abProfiles.firstWhereOrNull((e) => e.name == key) == null);
           for (int i = 0; i < abProfiles.length; i++) {
@@ -182,6 +201,7 @@ class AbModel {
         }
       } catch (e) {
         debugPrint("pull ab list error: $e");
+        _setListPullError(e, quiet: quiet);
       }
     } else if (listInitialized &&
         (!current.initialized || force == ForcePullAb.current)) {
@@ -197,60 +217,85 @@ class AbModel {
     }
   }
 
-  Future<bool> _getAbSettings() async {
+  void _setListPullError(Object err, {required bool quiet, int? statusCode}) {
+    if (!quiet) {
+      _listPullError.value =
+          '${translate('pull_ab_failed_tip')}: ${translate(err.toString())}';
+    }
+    if (statusCode == 401) {
+      gFFI.userModel.reset(resetOther: true);
+    }
+  }
+
+  Future<bool> _getAbSettings({required bool quiet}) async {
+    int? statusCode;
     try {
       final api = "${await bind.mainGetApiServer()}/api/ab/settings";
       var headers = getHttpHeaders();
       headers['Content-Type'] = "application/json";
+      _setEmptyBody(headers);
       final resp = await http.post(Uri.parse(api), headers: headers);
-      if (resp.statusCode == 404) {
+      statusCode = resp.statusCode;
+      if (statusCode == 404) {
         debugPrint("HTTP 404, api server doesn't support shared address book");
         return false;
       }
       Map<String, dynamic> json =
-          _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+          _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
       if (json.containsKey('error')) {
         throw json['error'];
       }
-      if (resp.statusCode != 200) {
-        throw 'HTTP ${resp.statusCode}';
+      if (statusCode != 200) {
+        throw 'HTTP $statusCode';
       }
       _maxPeerOneAb = json['max_peer_one_ab'] ?? 0;
       return true;
     } catch (err) {
       debugPrint('get ab settings err: ${err.toString()}');
+      _setListPullError(err, quiet: quiet, statusCode: statusCode);
     }
     return false;
   }
 
-  Future<bool> _getPersonalAbGuid() async {
+  /// Loads `/api/ab/personal`.
+  /// Returns `true` to continue init, `false` to stop after a real error.
+  Future<bool> _getPersonalAbGuid({required bool quiet}) async {
+    int? statusCode;
     try {
       final api = "${await bind.mainGetApiServer()}/api/ab/personal";
       var headers = getHttpHeaders();
       headers['Content-Type'] = "application/json";
+      _setEmptyBody(headers);
       final resp = await http.post(Uri.parse(api), headers: headers);
-      if (resp.statusCode == 404) {
+      statusCode = resp.statusCode;
+      if (statusCode == 404) {
         debugPrint("HTTP 404, current api server is legacy mode");
-        return false;
+        // Old server: keep `_personalAbGuid` null and continue in legacy mode.
+        return true;
       }
       Map<String, dynamic> json =
-          _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+          _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
       if (json.containsKey('error')) {
         throw json['error'];
       }
-      if (resp.statusCode != 200) {
-        throw 'HTTP ${resp.statusCode}';
+      if (statusCode != 200) {
+        throw 'HTTP $statusCode';
       }
       _personalAbGuid = json['guid'];
+      // New server: guid is available, continue in non-legacy mode.
       return true;
     } catch (err) {
       debugPrint('get personal ab err: ${err.toString()}');
+      _setListPullError(err, quiet: quiet, statusCode: statusCode);
     }
+    // Real error: stop the current pull.
     return false;
   }
 
-  Future<bool> _getSharedAbProfiles(List<AbProfile> profiles) async {
+  Future<bool> _getSharedAbProfiles(List<AbProfile> profiles,
+      {required bool quiet}) async {
     final api = "${await bind.mainGetApiServer()}/api/ab/shared/profiles";
+    int? statusCode;
     try {
       var uri0 = Uri.parse(api);
       final pageSize = 100;
@@ -269,14 +314,21 @@ class AbModel {
             });
         var headers = getHttpHeaders();
         headers['Content-Type'] = "application/json";
+        _setEmptyBody(headers);
         final resp = await http.post(uri, headers: headers);
+        statusCode = resp.statusCode;
+        if (statusCode == 404) {
+          debugPrint(
+              "HTTP 404, api server doesn't support shared address book");
+          return false;
+        }
         Map<String, dynamic> json =
-            _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+            _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
         if (json.containsKey('error')) {
           throw json['error'];
         }
-        if (resp.statusCode != 200) {
-          throw 'HTTP ${resp.statusCode}';
+        if (statusCode != 200) {
+          throw 'HTTP $statusCode';
         }
         if (json.containsKey('total')) {
           if (total == 0) total = json['total'];
@@ -299,6 +351,7 @@ class AbModel {
       return true;
     } catch (err) {
       debugPrint('_getSharedAbProfiles err: ${err.toString()}');
+      _setListPullError(err, quiet: quiet, statusCode: statusCode);
     }
     return false;
   }
@@ -319,8 +372,8 @@ class AbModel {
 // #endregion
 
 // #region peer
-  Future<String?> addIdToCurrent(
-      String id, String alias, String password, List<dynamic> tags) async {
+  Future<String?> addIdToCurrent(String id, String alias, String password,
+      List<dynamic> tags, String note) async {
     if (currentAbPeers.where((element) => element.id == id).isNotEmpty) {
       return "$id already exists in address book $_currentName";
     }
@@ -332,6 +385,9 @@ class AbModel {
     // avoid set existing password to empty
     if (password.isNotEmpty) {
       peer['password'] = password;
+    }
+    if (note.isNotEmpty) {
+      peer['note'] = note;
     }
     final ret = await addPeersTo([peer], _currentName.value);
     _syncAllFromRecent = true;
@@ -373,6 +429,14 @@ class AbModel {
     await pullNonLegacyAfterChange();
     currentAbPeers.refresh();
     _saveCache();
+    return res;
+  }
+
+  Future<bool> changeNote({required String id, required String note}) async {
+    bool res = await current.changeNote(id: id, note: note);
+    await pullNonLegacyAfterChange();
+    currentAbPeers.refresh();
+    // no need to save cache
     return res;
   }
 
@@ -609,7 +673,7 @@ class AbModel {
             if (name == null || guid == null) {
               continue;
             }
-            ab = Ab(AbProfile(guid, name, '', '', ShareRule.read.value),
+            ab = Ab(AbProfile(guid, name, '', '', ShareRule.read.value, null),
                 name == _personalAddressBookName);
           }
           addressbooks[name] = ab;
@@ -655,6 +719,15 @@ class AbModel {
       return [];
     } else {
       return it.first.tags;
+    }
+  }
+
+  String getPeerNote(String id) {
+    final it = currentAbPeers.where((p0) => p0.id == id);
+    if (it.isEmpty) {
+      return '';
+    } else {
+      return it.first.note;
     }
   }
 
@@ -767,6 +840,28 @@ class AbModel {
     _peerIdUpdateListeners.remove(key);
   }
 
+  String? getdefaultSharedPassword() {
+    if (current.isPersonal()) {
+      return null;
+    }
+    final profile = current.sharedProfile();
+    if (profile == null) {
+      return null;
+    }
+    try {
+      if (profile.info is Map) {
+        final password = (profile.info as Map)['password'];
+        if (password is String && password.isNotEmpty) {
+          return password;
+        }
+      }
+      return null;
+    } catch (e) {
+      debugPrint("getdefaultSharedPassword: $e");
+      return null;
+    }
+  }
+
 // #endregion
 }
 
@@ -840,6 +935,8 @@ abstract class BaseAb {
   Future<bool> changeTagForPeers(List<String> ids, List<dynamic> tags);
 
   Future<bool> changeAlias({required String id, required String alias});
+
+  Future<bool> changeNote({required String id, required String note});
 
   Future<bool> changePersonalHashPassword(String id, String hash);
 
@@ -925,7 +1022,7 @@ class LegacyAb extends BaseAb {
         peers.clear();
       } else if (resp.body.isNotEmpty) {
         Map<String, dynamic> json =
-            _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+            _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
         if (json.containsKey('error')) {
           throw json['error'];
         } else if (json.containsKey('data')) {
@@ -968,22 +1065,14 @@ class LegacyAb extends BaseAb {
       var authHeaders = getHttpHeaders();
       authHeaders['Content-Type'] = "application/json";
       final body = jsonEncode({"data": jsonEncode(_serialize())});
-      http.Response resp;
-      // support compression
-      if (licensedDevices > 0 && body.length > 1024) {
-        authHeaders['Content-Encoding'] = "gzip";
-        resp = await http.post(Uri.parse(api),
-            headers: authHeaders, body: GZipCodec().encode(utf8.encode(body)));
-      } else {
-        resp =
-            await http.post(Uri.parse(api), headers: authHeaders, body: body);
-      }
+      http.Response resp =
+          await http.post(Uri.parse(api), headers: authHeaders, body: body);
       if (resp.statusCode == 200 &&
           (resp.body.isEmpty || resp.body.toLowerCase() == 'null')) {
         ret = true;
       } else {
         Map<String, dynamic> json =
-            _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+            _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
         if (json.containsKey('error')) {
           throw json['error'];
         } else if (resp.statusCode == 200) {
@@ -1066,6 +1155,12 @@ class LegacyAb extends BaseAb {
     }
     it.first.alias = alias;
     return await pushAb();
+  }
+
+  @override
+  Future<bool> changeNote({required String id, required String note}) async {
+    // no need to implement
+    return false;
   }
 
   @override
@@ -1356,10 +1451,11 @@ class Ab extends BaseAb {
             });
         var headers = getHttpHeaders();
         headers['Content-Type'] = "application/json";
+        _setEmptyBody(headers);
         final resp = await http.post(uri, headers: headers);
         statusCode = resp.statusCode;
         Map<String, dynamic> json =
-            _jsonDecodeRespMap(utf8.decode(resp.bodyBytes), resp.statusCode);
+            _jsonDecodeRespMap(decode_http_response(resp), resp.statusCode);
         if (json.containsKey('error')) {
           throw json['error'];
         }
@@ -1413,10 +1509,11 @@ class Ab extends BaseAb {
       );
       var headers = getHttpHeaders();
       headers['Content-Type'] = "application/json";
+      _setEmptyBody(headers);
       final resp = await http.post(uri, headers: headers);
       statusCode = resp.statusCode;
       List<dynamic> json =
-          _jsonDecodeRespList(utf8.decode(resp.bodyBytes), resp.statusCode);
+          _jsonDecodeRespList(decode_http_response(resp), resp.statusCode);
       if (resp.statusCode != 200) {
         throw 'HTTP ${resp.statusCode}';
       }
@@ -1523,6 +1620,27 @@ class Ab extends BaseAb {
       return true;
     } catch (err) {
       debugPrint('changeAlias err: ${err.toString()}');
+      return false;
+    }
+  }
+
+  @override
+  Future<bool> changeNote({required String id, required String note}) async {
+    try {
+      final api =
+          "${await bind.mainGetApiServer()}/api/ab/peer/update/${profile.guid}";
+      var headers = getHttpHeaders();
+      headers['Content-Type'] = "application/json";
+      final body = jsonEncode({"id": id, "note": note});
+      final resp = await http.put(Uri.parse(api), headers: headers, body: body);
+      final errMsg = _jsonDecodeActionResp(resp);
+      if (errMsg.isNotEmpty) {
+        BotToast.showText(contentColor: Colors.red, text: errMsg);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      debugPrint('changeNote err: ${err.toString()}');
       return false;
     }
   }
@@ -1794,6 +1912,11 @@ class DummyAb extends BaseAb {
   }
 
   @override
+  Future<bool> changeNote({required String id, required String note}) async {
+    return false;
+  }
+
+  @override
   Future<bool> changePersonalHashPassword(String id, String hash) async {
     return false;
   }
@@ -1900,4 +2023,9 @@ String _jsonDecodeActionResp(http.Response resp) {
     }
   }
   return errMsg;
+}
+
+// https://github.com/seanmonstar/reqwest/issues/838
+void _setEmptyBody(Map<String, String> headers) {
+  headers['Content-Length'] = '0';
 }
