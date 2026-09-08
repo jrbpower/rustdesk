@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 from pathlib import Path
-import base64
 import io
 
 APP_NAME = "GISuporte"
@@ -18,16 +17,16 @@ def replace_required(path: Path, old: str, new: str) -> None:
 
 def configure_server() -> None:
     path = Path("src/flutter_ffi.rs")
-    old = '''    if custom_client_config.is_empty() {
+    old = """    if custom_client_config.is_empty() {
         crate::load_custom_client();
     } else {
         crate::read_custom_client(custom_client_config);
     }
-'''
-    new = f'''    // GISuporte: fixed self-hosted server configuration.
+"""
+    new = f"""    // GISuporte: fixed self-hosted server configuration.
     // Internal RustDesk protocol/package identifiers are kept for compatibility.
     crate::read_custom_client("{CUSTOM_CONFIG}");
-'''
+"""
     replace_required(path, old, new)
 
     text = path.read_text(encoding="utf-8")
@@ -72,14 +71,33 @@ def brand_translations() -> None:
     print(f"GISuporte translations: {changed_lines} visible strings in {changed_files} files")
 
 
+def load_logo_bytes() -> bytes:
+    logo_path = Path("res/gisuporte_logo.jpg")
+    if not logo_path.exists():
+        raise RuntimeError("GISuporte logo asset is missing: res/gisuporte_logo.jpg")
+
+    raw = logo_path.read_bytes()
+    if len(raw) < 4 or raw[:3] != b"\xff\xd8\xff":
+        raise RuntimeError("GISuporte logo asset is invalid: expected a JPEG image")
+
+    return raw
+
+
 def generate_icons() -> None:
     try:
-        from PIL import Image
+        from PIL import Image, UnidentifiedImageError
     except ImportError as exc:
         raise RuntimeError("Pillow is required: python -m pip install pillow") from exc
 
-    encoded = Path("res/gisuporte_logo.jpg.b64").read_text(encoding="utf-8").strip()
-    image = Image.open(io.BytesIO(base64.b64decode(encoded))).convert("RGB")
+    raw = load_logo_bytes()
+
+    try:
+        with Image.open(io.BytesIO(raw)) as source:
+            source.verify()
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
+    except (UnidentifiedImageError, OSError) as exc:
+        raise RuntimeError("GISuporte logo asset is invalid or corrupted") from exc
+
     side = max(image.size)
     square = Image.new("RGB", (side, side), "black")
     square.paste(image, ((side - image.width) // 2, (side - image.height) // 2))
