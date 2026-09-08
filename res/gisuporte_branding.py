@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import base64
+import io
 
 APP_NAME = "GISuporte"
 SERVER = "191.252.210.203"
@@ -15,9 +17,6 @@ def replace_required(path: Path, old: str, new: str) -> None:
 
 
 def configure_server() -> None:
-    # Flutter desktop and Android both enter through initialize().
-    # Force the custom-client configuration so the end user does not need
-    # to configure ID/relay server or public key manually.
     path = Path("src/flutter_ffi.rs")
     old = '''    if custom_client_config.is_empty() {
         crate::load_custom_client();
@@ -26,7 +25,7 @@ def configure_server() -> None:
     }
 '''
     new = f'''    // GISuporte: fixed self-hosted server configuration.
-    // Keep the internal RustDesk protocol/package identifiers for compatibility.
+    // Internal RustDesk protocol/package identifiers are kept for compatibility.
     crate::read_custom_client("{CUSTOM_CONFIG}");
 '''
     replace_required(path, old, new)
@@ -37,13 +36,10 @@ def configure_server() -> None:
     if app_name_line not in text:
         if marker not in text:
             raise RuntimeError("APP_DIR initialization marker not found")
-        text = text.replace(marker, marker + app_name_line, 1)
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text.replace(marker, marker + app_name_line, 1), encoding="utf-8")
 
 
 def brand_flutter_ui() -> None:
-    # Replace only the product's user-visible proper name in Dart UI sources.
-    # Lower-case internal identifiers, package names and rustdesk:// are untouched.
     root = Path("flutter/lib")
     changed = 0
     for path in root.rglob("*.dart"):
@@ -54,9 +50,45 @@ def brand_flutter_ui() -> None:
     print(f"GISuporte branding applied to {changed} Flutter UI files")
 
 
+def generate_icons() -> None:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required: python -m pip install pillow") from exc
+
+    encoded = Path("res/gisuporte_logo.jpg.b64").read_text(encoding="utf-8").strip()
+    image = Image.open(io.BytesIO(base64.b64decode(encoded))).convert("RGB")
+    side = max(image.size)
+    square = Image.new("RGB", (side, side), "black")
+    square.paste(image, ((side - image.width) // 2, (side - image.height) // 2))
+
+    android_sizes = {
+        "mipmap-mdpi": 48,
+        "mipmap-hdpi": 72,
+        "mipmap-xhdpi": 96,
+        "mipmap-xxhdpi": 144,
+        "mipmap-xxxhdpi": 192,
+    }
+    base = Path("flutter/android/app/src/main/res")
+    for density, size in android_sizes.items():
+        target = base / density / "ic_launcher.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        square.resize((size, size), Image.Resampling.LANCZOS).save(target, "PNG", optimize=True)
+
+    ico = Path("flutter/windows/runner/resources/app_icon.ico")
+    ico.parent.mkdir(parents=True, exist_ok=True)
+    square.save(
+        ico,
+        format="ICO",
+        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
+    print("GISuporte Android and Windows icons generated")
+
+
 def main() -> None:
     configure_server()
     brand_flutter_ui()
+    generate_icons()
     print(f"Configured {APP_NAME} for self-hosted server {SERVER}")
 
 
