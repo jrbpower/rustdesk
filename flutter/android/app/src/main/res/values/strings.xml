@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">RustDesk</string>
-    <string name="accessibility_service_description">Allow other devices to control your phone using virtual touch, when RustDesk screen sharing is established</string>
+    <string name="app_name">GISuporte</string>
+    <string name="accessibility_service_description">Permitir que outros dispositivos controlem este telefone usando toque virtual quando o compartilhamento de tela do GISuporte estiver ativo</string>
 </resources>
