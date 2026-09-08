@@ -10,9 +10,10 @@ env:
   RUST_VERSION: "1.75"
   CARGO_NDK_VERSION: "3.1.2"
   ANDROID_FLUTTER_VERSION: "3.24.5"
-  VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"
-  NDK_VERSION: "r27c"
-  VERSION: "1.4.1"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  NDK_VERSION: "r28c"
+  VERSION: "1.4.9"
 
 jobs:
   generate-bridge:
@@ -34,6 +35,13 @@ jobs:
           large-packages: false
           docker-images: true
           swap-storage: false
+
+      - name: Exportar cache do GitHub Actions
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -81,13 +89,6 @@ jobs:
         with:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: true
-
-      - name: Exportar cache do GitHub Actions
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
       - name: Configurar vcpkg
         uses: lukka/run-vcpkg@v11
@@ -143,8 +144,6 @@ jobs:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
         run: |
           export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
-          # APK instalavel para testes sem exigir segredo de assinatura.
-          # Para distribuicao oficial, substituiremos pela sua chave JKS em GitHub Secrets.
           sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
           pushd flutter
           flutter build apk --release --target-platform android-arm64 --split-per-abi

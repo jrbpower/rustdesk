@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import base64
 import io
 
 APP_NAME = "GISuporte"
@@ -17,6 +18,8 @@ def replace_required(path: Path, old: str, new: str) -> None:
 
 def configure_server() -> None:
     path = Path("src/flutter_ffi.rs")
+    text = path.read_text(encoding="utf-8")
+
     old = """    if custom_client_config.is_empty() {
         crate::load_custom_client();
     } else {
@@ -27,15 +30,19 @@ def configure_server() -> None:
     // Internal RustDesk protocol/package identifiers are kept for compatibility.
     crate::read_custom_client("{CUSTOM_CONFIG}");
 """
-    replace_required(path, old, new)
+    if new not in text:
+        if old not in text:
+            raise RuntimeError("RustDesk custom client configuration block was not found")
+        text = text.replace(old, new, 1)
 
-    text = path.read_text(encoding="utf-8")
-    marker = '    *config::APP_DIR.write().unwrap() = app_dir.to_owned();\n'
     app_name_line = f'    *config::APP_NAME.write().unwrap() = "{APP_NAME}".to_owned();\n'
     if app_name_line not in text:
+        marker = "    // core_main's load_custom_client does not work for flutter since it is only applied to its load_library in main.c\n"
         if marker not in text:
-            raise RuntimeError("APP_DIR initialization marker not found")
-        path.write_text(text.replace(marker, marker + app_name_line, 1), encoding="utf-8")
+            raise RuntimeError("RustDesk Flutter initialization marker was not found")
+        text = text.replace(marker, app_name_line + marker, 1)
+
+    path.write_text(text, encoding="utf-8")
 
 
 def brand_flutter_ui() -> None:
@@ -71,15 +78,46 @@ def brand_translations() -> None:
     print(f"GISuporte translations: {changed_lines} visible strings in {changed_files} files")
 
 
-def load_logo_bytes() -> bytes:
-    logo_path = Path("res/gisuporte_logo.jpg")
-    if not logo_path.exists():
-        raise RuntimeError("GISuporte logo asset is missing: res/gisuporte_logo.jpg")
+def brand_platform_metadata() -> None:
+    manifest = Path("flutter/android/app/src/main/AndroidManifest.xml")
+    text = manifest.read_text(encoding="utf-8")
+    text = text.replace('android:label="RustDesk"', f'android:label="{APP_NAME}"')
+    text = text.replace('android:label="RustDesk Input"', f'android:label="{APP_NAME} Input"')
+    manifest.write_text(text, encoding="utf-8")
 
-    raw = logo_path.read_bytes()
+    strings = Path("flutter/android/app/src/main/res/values/strings.xml")
+    text = strings.read_text(encoding="utf-8").replace("RustDesk", APP_NAME)
+    strings.write_text(text, encoding="utf-8")
+
+    runner = Path("flutter/windows/runner/Runner.rc")
+    text = runner.read_text(encoding="utf-8")
+    replacements = {
+        'VALUE "CompanyName", "Purslane Tech Pte. Ltd." "\\0"': 'VALUE "CompanyName", "GISuporte" "\\0"',
+        'VALUE "FileDescription", "RustDesk Remote Desktop" "\\0"': 'VALUE "FileDescription", "GISuporte - Suporte Remoto" "\\0"',
+        'VALUE "LegalCopyright", "Copyright © 2026 Purslane Tech Pte. Ltd. All rights reserved." "\\0"': 'VALUE "LegalCopyright", "GISuporte" "\\0"',
+        'VALUE "ProductName", "RustDesk" "\\0"': 'VALUE "ProductName", "GISuporte" "\\0"',
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    runner.write_text(text, encoding="utf-8")
+    print("GISuporte Android/Windows metadata applied")
+
+
+def load_logo_bytes() -> bytes:
+    binary_path = Path("res/gisuporte_logo.jpg")
+    if binary_path.exists():
+        raw = binary_path.read_bytes()
+    else:
+        b64_path = Path("res/gisuporte_logo.jpg.b64")
+        if not b64_path.exists():
+            raise RuntimeError("GISuporte logo asset is missing")
+        try:
+            raw = base64.b64decode(b64_path.read_text(encoding="ascii"), validate=False)
+        except Exception as exc:
+            raise RuntimeError("GISuporte base64 logo asset is invalid") from exc
+
     if len(raw) < 4 or raw[:3] != b"\xff\xd8\xff":
         raise RuntimeError("GISuporte logo asset is invalid: expected a JPEG image")
-
     return raw
 
 
@@ -90,7 +128,6 @@ def generate_icons() -> None:
         raise RuntimeError("Pillow is required: python -m pip install pillow") from exc
 
     raw = load_logo_bytes()
-
     try:
         with Image.open(io.BytesIO(raw)) as source:
             source.verify()
@@ -127,6 +164,7 @@ def generate_icons() -> None:
 
 def main() -> None:
     configure_server()
+    brand_platform_metadata()
     brand_flutter_ui()
     brand_translations()
     generate_icons()

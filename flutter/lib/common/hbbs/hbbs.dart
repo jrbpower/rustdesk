@@ -25,6 +25,8 @@ enum UserStatus { kDisabled, kNormal, kUnverified }
 // Is all the fields of the user needed?
 class UserPayload {
   String name = '';
+  String displayName = '';
+  String avatar = '';
   String email = '';
   String note = '';
   String? verifier;
@@ -33,6 +35,8 @@ class UserPayload {
 
   UserPayload.fromJson(Map<String, dynamic> json)
       : name = json['name'] ?? '',
+        displayName = json['display_name'] ?? '',
+        avatar = json['avatar'] ?? '',
         email = json['email'] ?? '',
         note = json['note'] ?? '',
         verifier = json['verifier'],
@@ -46,6 +50,8 @@ class UserPayload {
   Map<String, dynamic> toJson() {
     final Map<String, dynamic> map = {
       'name': name,
+      'display_name': displayName,
+      'avatar': avatar,
       'status': status == UserStatus.kDisabled
           ? 0
           : status == UserStatus.kUnverified
@@ -58,8 +64,13 @@ class UserPayload {
   Map<String, dynamic> toGroupCacheJson() {
     final Map<String, dynamic> map = {
       'name': name,
+      'display_name': displayName,
     };
     return map;
+  }
+
+  String get displayNameOrName {
+    return displayName.trim().isEmpty ? name : displayName;
   }
 }
 
@@ -89,6 +100,7 @@ class PeerPayload {
       "platform": _platform(p.info['os']),
       "hostname": p.info['device_name'],
       "device_group_name": p.device_group_name,
+      "note": p.note,
     });
   }
 
@@ -248,15 +260,17 @@ class AbProfile {
   String name;
   String owner;
   String? note;
+  dynamic info;
   int rule;
 
-  AbProfile(this.guid, this.name, this.owner, this.note, this.rule);
+  AbProfile(this.guid, this.name, this.owner, this.note, this.rule, this.info);
 
   AbProfile.fromJson(Map<String, dynamic> json)
       : guid = json['guid'] ?? '',
         name = json['name'] ?? '',
         owner = json['owner'] ?? '',
         note = json['note'] ?? '',
+        info = json['info'],
         rule = json['rule'] ?? 0;
 }
 

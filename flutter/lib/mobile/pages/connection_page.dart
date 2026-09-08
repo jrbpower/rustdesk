@@ -182,6 +182,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
                           rdpUsername: '',
                           loginName: '',
                           device_group_name: '',
+                          note: '',
                         );
                         _autocompleteOpts = [emptyPeer];
                       } else {
@@ -206,6 +207,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
                                     .contains(textToFind) ||
                                 peer.alias.toLowerCase().contains(textToFind))
                             .toList();
+                        _allPeersLoader.queryOnlines(_autocompleteOpts);
                       }
                       return _autocompleteOpts;
                     },

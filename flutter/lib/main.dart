@@ -27,6 +27,7 @@ import 'common.dart';
 import 'consts.dart';
 import 'mobile/pages/home_page.dart';
 import 'mobile/pages/server_page.dart';
+import 'mobile/widgets/deploy_dialog.dart';
 import 'models/platform_model.dart';
 
 import 'package:flutter_hbb/plugin/handlers.dart'
@@ -147,9 +148,15 @@ void runMainApp(bool startService) async {
   gFFI.userModel.refreshCurrentUser();
   runApp(App());
 
+  bool? alwaysOnTop;
+  if (isDesktop) {
+    alwaysOnTop =
+        bind.mainGetBuildinOption(key: "main-window-always-on-top") == 'Y';
+  }
+
   // Set window option.
-  WindowOptions windowOptions =
-      getHiddenTitleBarWindowOptions(isMainWindow: true);
+  WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
+      isMainWindow: true, alwaysOnTop: alwaysOnTop);
   windowManager.waitUntilReadyToShow(windowOptions, () async {
     // Restore the location of the main window before window hide or show.
     await restoreWindowPosition(WindowType.Main);
@@ -567,6 +574,14 @@ _registerEventHandler() {
   if (isDesktop) {
     platformFFI.registerEventHandler('native_ui', 'native_ui', (evt) async {
       NativeUiHandler.instance.onEvent(evt);
+    });
+  }
+  if (isAndroid) {
+    platformFFI.registerEventHandler(
+        'android_needs_deploy', 'android_needs_deploy', (_) async {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        showDeployPromptDialog();
+      });
     });
   }
 }
