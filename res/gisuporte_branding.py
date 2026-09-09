@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 from pathlib import Path
-import base64
 import io
 
 APP_NAME = "GISuporte"
@@ -105,17 +104,10 @@ def brand_platform_metadata() -> None:
 
 def load_logo_bytes() -> bytes:
     binary_path = Path("res/gisuporte_logo.jpg")
-    if binary_path.exists():
-        raw = binary_path.read_bytes()
-    else:
-        b64_path = Path("res/gisuporte_logo.jpg.b64")
-        if not b64_path.exists():
-            raise RuntimeError("GISuporte logo asset is missing")
-        try:
-            raw = base64.b64decode(b64_path.read_text(encoding="ascii"), validate=False)
-        except Exception as exc:
-            raise RuntimeError("GISuporte base64 logo asset is invalid") from exc
+    if not binary_path.exists():
+        raise RuntimeError("GISuporte logo asset is missing: res/gisuporte_logo.jpg")
 
+    raw = binary_path.read_bytes()
     if len(raw) < 4 or raw[:3] != b"\xff\xd8\xff":
         raise RuntimeError("GISuporte logo asset is invalid: expected a JPEG image")
     return raw
