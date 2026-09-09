@@ -48,13 +48,19 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Aplicar branding e servidor GISuporte
+      - name: Aplicar e validar branding e servidor GISuporte
         shell: bash
         run: |
           python3 -m pip install --disable-pip-version-check pillow
-          python3 res/gisuporte_branding.py
+          python3 res/gisuporte_branding.py | tee /tmp/gisuporte-branding.log
+          grep -q "GISUPORTE_VALIDATION_OK" /tmp/gisuporte-branding.log
+          test -s flutter/assets/icon.png
           grep -n "GISuporte" flutter/android/app/src/main/AndroidManifest.xml
           grep -n "191.252.210.203" src/flutter_ffi.rs
+          if grep -RniE 'https?://(www\.)?rustdesk\.com' flutter/lib --include='*.dart'; then
+            echo "ERRO: referencia visivel a rustdesk.com encontrada no Flutter"
+            exit 1
+          fi
 
       - name: Instalar dependencias
         run: |
