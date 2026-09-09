@@ -171,9 +171,6 @@ def generate_icons() -> None:
 
 def validate_branding() -> None:
     ffi = Path("src/flutter_ffi.rs").read_text(encoding="utf-8")
-    init_start = ffi.find("fn initialize(")
-    init_end = ffi.find("\n}\n", init_start)
-    init = ffi[init_start:init_end] if init_start >= 0 and init_end > init_start else ffi
 
     required = [
         f'EXE_RENDEZVOUS_SERVER.write().unwrap() = "{SERVER}"',
@@ -182,10 +179,10 @@ def validate_branding() -> None:
         f'"key".to_owned(), "{KEY}".to_owned()',
         f'APP_NAME.write().unwrap() = "{APP_NAME}"',
     ]
-    missing = [item for item in required if item not in init]
+    missing = [item for item in required if item not in ffi]
     if missing:
         raise RuntimeError(f"GISuporte server/branding validation failed; missing: {missing}")
-    if "crate::load_custom_client();" in init or "crate::read_custom_client(custom_client_config);" in init:
+    if "crate::load_custom_client();" in ffi or "crate::read_custom_client(custom_client_config);" in ffi:
         raise RuntimeError("GISuporte validation failed: upstream custom-client fallback is still active")
 
     icon = Path("flutter/assets/icon.png")
