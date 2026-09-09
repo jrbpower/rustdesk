@@ -146,18 +146,36 @@ def generate_icons() -> None:
         flutter_icon, "PNG", optimize=True
     )
 
+    # Android 8+ resolves @mipmap/ic_launcher to the adaptive icon XML in
+    # mipmap-anydpi-v26. That XML uses ic_launcher_foreground, so replacing
+    # only ic_launcher.png leaves the RustDesk launcher icon visible.
+    # Generate legacy, round and adaptive-foreground resources for every density.
     android_sizes = {
-        "mipmap-mdpi": 48,
-        "mipmap-hdpi": 72,
-        "mipmap-xhdpi": 96,
-        "mipmap-xxhdpi": 144,
-        "mipmap-xxxhdpi": 192,
+        "mipmap-mdpi": (48, 108),
+        "mipmap-hdpi": (72, 162),
+        "mipmap-xhdpi": (96, 216),
+        "mipmap-xxhdpi": (144, 324),
+        "mipmap-xxxhdpi": (192, 432),
     }
     base = Path("flutter/android/app/src/main/res")
-    for density, size in android_sizes.items():
-        target = base / density / "ic_launcher.png"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        square.resize((size, size), Image.Resampling.LANCZOS).save(target, "PNG", optimize=True)
+    for density, (legacy_size, foreground_size) in android_sizes.items():
+        folder = base / density
+        folder.mkdir(parents=True, exist_ok=True)
+
+        legacy = square.resize(
+            (legacy_size, legacy_size), Image.Resampling.LANCZOS
+        )
+        legacy.save(folder / "ic_launcher.png", "PNG", optimize=True)
+        legacy.save(folder / "ic_launcher_round.png", "PNG", optimize=True)
+
+        # Adaptive foreground canvas is 108dp. Keep the actual logo inside the
+        # central safe area so Android launcher masks do not crop it.
+        foreground = Image.new("RGBA", (foreground_size, foreground_size), (0, 0, 0, 0))
+        logo_size = int(foreground_size * 0.66)
+        logo = square.resize((logo_size, logo_size), Image.Resampling.LANCZOS).convert("RGBA")
+        offset = (foreground_size - logo_size) // 2
+        foreground.alpha_composite(logo, (offset, offset))
+        foreground.save(folder / "ic_launcher_foreground.png", "PNG", optimize=True)
 
     ico = Path("flutter/windows/runner/resources/app_icon.ico")
     ico.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +184,7 @@ def generate_icons() -> None:
         format="ICO",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
-    print("GISuporte Flutter, Android and Windows icons generated")
+    print("GISuporte Flutter, Android legacy/adaptive and Windows icons generated")
 
 
 def validate_branding() -> None:
@@ -189,6 +207,27 @@ def validate_branding() -> None:
     if not icon.exists() or not icon.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"):
         raise RuntimeError("GISuporte validation failed: Flutter in-app icon was not generated")
 
+    android_base = Path("flutter/android/app/src/main/res")
+    for density in [
+        "mipmap-mdpi",
+        "mipmap-hdpi",
+        "mipmap-xhdpi",
+        "mipmap-xxhdpi",
+        "mipmap-xxxhdpi",
+    ]:
+        for name in ["ic_launcher.png", "ic_launcher_round.png", "ic_launcher_foreground.png"]:
+            candidate = android_base / density / name
+            if not candidate.exists() or not candidate.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"):
+                raise RuntimeError(
+                    f"GISuporte validation failed: Android launcher resource missing/invalid: {candidate}"
+                )
+
+    adaptive_xml = (
+        android_base / "mipmap-anydpi-v26" / "ic_launcher.xml"
+    ).read_text(encoding="utf-8")
+    if '@mipmap/ic_launcher_foreground' not in adaptive_xml:
+        raise RuntimeError("GISuporte validation failed: Android adaptive icon foreground is not configured")
+
     remaining_sites = []
     for path in Path("flutter/lib").rglob("*.dart"):
         text = path.read_text(encoding="utf-8")
@@ -201,7 +240,7 @@ def validate_branding() -> None:
         )
 
     print("GISUPORTE_VALIDATION_OK")
-    print(f"GISuporte server fixed to {SERVER}; relay={SERVER}; in-app logo and links validated")
+    print(f"GISuporte server fixed to {SERVER}; relay={SERVER}; launcher/in-app icons and links validated")
 
 
 def main() -> None:
