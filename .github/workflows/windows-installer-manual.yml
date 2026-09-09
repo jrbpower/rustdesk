@@ -36,13 +36,25 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Configurar Python e branding GISuporte
+      - name: Aplicar e validar branding e servidor GISuporte
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check pillow
-          python res/gisuporte_branding.py
+          $branding = python res/gisuporte_branding.py
+          $branding | Write-Output
+          if (-not ($branding -match "GISUPORTE_VALIDATION_OK")) {
+            throw "Validacao do branding/servidor GISuporte nao foi concluida"
+          }
+          if (-not (Test-Path "flutter/assets/icon.png")) {
+            throw "Logo interno GISuporte nao foi gerado"
+          }
           Select-String -Path src/flutter_ffi.rs -Pattern "191.252.210.203"
           Select-String -Path flutter/windows/runner/Runner.rc -Pattern "GISuporte"
+          $badLinks = Get-ChildItem flutter/lib -Recurse -Filter *.dart | Select-String -Pattern 'https?://(www\.)?rustdesk\.com'
+          if ($badLinks) {
+            $badLinks | Write-Output
+            throw "Referencia visivel a rustdesk.com encontrada no Flutter"
+          }
 
       - name: Instalar LLVM e Clang
         uses: KyleMayes/install-llvm-action@v1
