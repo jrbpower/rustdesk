@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import io
+import re
 
 APP_NAME = "GISuporte"
 SERVER = "191.252.210.203"
 KEY = "aUbDo6Map3oFCVpb9VB66sNTbuvz3bX3iCoKVBGVUe4="
-CUSTOM_CONFIG = f"host={SERVER},key={KEY},relay={SERVER}"
-
-
-def replace_required(path: Path, old: str, new: str) -> None:
-    text = path.read_text(encoding="utf-8")
-    if old not in text:
-        raise RuntimeError(f"Expected text not found in {path}: {old[:80]!r}")
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+SUPPORT_URL = "https://github.com/jrbpower/GI-SUPORTE-REMOTO"
 
 
 def configure_server() -> None:
@@ -25,13 +19,20 @@ def configure_server() -> None:
         crate::read_custom_client(custom_client_config);
     }
 """
-    new = f"""    // GISuporte: fixed self-hosted server configuration.
-    // Internal RustDesk protocol/package identifiers are kept for compatibility.
-    crate::read_custom_client("{CUSTOM_CONFIG}");
+    new = f"""    // GISuporte: force the self-hosted infrastructure on every startup.
+    // RustDesk 1.4.9 read_custom_client() expects an encoded/signed payload, so
+    // a plain host=...,key=...,relay=... string is intentionally not used here.
+    *config::EXE_RENDEZVOUS_SERVER.write().unwrap() = "{SERVER}".to_owned();
+    {{
+        let mut settings = config::OVERWRITE_SETTINGS.write().unwrap();
+        settings.insert("custom-rendezvous-server".to_owned(), "{SERVER}".to_owned());
+        settings.insert("relay-server".to_owned(), "{SERVER}".to_owned());
+        settings.insert("key".to_owned(), "{KEY}".to_owned());
+    }}
 """
     if new not in text:
         if old not in text:
-            raise RuntimeError("RustDesk custom client configuration block was not found")
+            raise RuntimeError("RustDesk Flutter custom-client initialization block was not found")
         text = text.replace(old, new, 1)
 
     app_name_line = f'    *config::APP_NAME.write().unwrap() = "{APP_NAME}".to_owned();\n'
@@ -47,12 +48,18 @@ def configure_server() -> None:
 def brand_flutter_ui() -> None:
     root = Path("flutter/lib")
     changed = 0
+    url_re = re.compile(r"https?://(?:www\.)?rustdesk\.com[^\s'\"\)<>]*", re.IGNORECASE)
+    bare_site_re = re.compile(r"(?<!@)\b(?:www\.)?rustdesk\.com\b", re.IGNORECASE)
+
     for path in root.rglob("*.dart"):
         text = path.read_text(encoding="utf-8")
-        if "RustDesk" in text:
-            path.write_text(text.replace("RustDesk", APP_NAME), encoding="utf-8")
+        branded = text.replace("RustDesk", APP_NAME)
+        branded = url_re.sub(SUPPORT_URL, branded)
+        branded = bare_site_re.sub("GISuporte", branded)
+        if branded != text:
+            path.write_text(branded, encoding="utf-8")
             changed += 1
-    print(f"GISuporte branding applied to {changed} Flutter UI files")
+    print(f"GISuporte branding/links applied to {changed} Flutter UI files")
 
 
 def brand_translations() -> None:
@@ -131,6 +138,14 @@ def generate_icons() -> None:
     square = Image.new("RGB", (side, side), "black")
     square.paste(image, ((side - image.width) // 2, (side - image.height) // 2))
 
+    # Flutter's loadIcon() looks for assets/icon.png first and only falls back
+    # to assets/icon.svg (the upstream RustDesk logo) when the PNG is missing.
+    flutter_icon = Path("flutter/assets/icon.png")
+    flutter_icon.parent.mkdir(parents=True, exist_ok=True)
+    square.resize((512, 512), Image.Resampling.LANCZOS).save(
+        flutter_icon, "PNG", optimize=True
+    )
+
     android_sizes = {
         "mipmap-mdpi": 48,
         "mipmap-hdpi": 72,
@@ -151,7 +166,42 @@ def generate_icons() -> None:
         format="ICO",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
-    print("GISuporte Android and Windows icons generated")
+    print("GISuporte Flutter, Android and Windows icons generated")
+
+
+def validate_branding() -> None:
+    ffi = Path("src/flutter_ffi.rs").read_text(encoding="utf-8")
+
+    required = [
+        f'EXE_RENDEZVOUS_SERVER.write().unwrap() = "{SERVER}"',
+        f'"custom-rendezvous-server".to_owned(), "{SERVER}".to_owned()',
+        f'"relay-server".to_owned(), "{SERVER}".to_owned()',
+        f'"key".to_owned(), "{KEY}".to_owned()',
+        f'APP_NAME.write().unwrap() = "{APP_NAME}"',
+    ]
+    missing = [item for item in required if item not in ffi]
+    if missing:
+        raise RuntimeError(f"GISuporte server/branding validation failed; missing: {missing}")
+    if "crate::load_custom_client();" in ffi or "crate::read_custom_client(custom_client_config);" in ffi:
+        raise RuntimeError("GISuporte validation failed: upstream custom-client fallback is still active")
+
+    icon = Path("flutter/assets/icon.png")
+    if not icon.exists() or not icon.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"):
+        raise RuntimeError("GISuporte validation failed: Flutter in-app icon was not generated")
+
+    remaining_sites = []
+    for path in Path("flutter/lib").rglob("*.dart"):
+        text = path.read_text(encoding="utf-8")
+        if re.search(r"(?<!@)\b(?:www\.)?rustdesk\.com\b", text, re.IGNORECASE):
+            remaining_sites.append(str(path))
+    if remaining_sites:
+        raise RuntimeError(
+            "GISuporte validation failed: visible rustdesk.com references remain in: "
+            + ", ".join(remaining_sites[:20])
+        )
+
+    print("GISUPORTE_VALIDATION_OK")
+    print(f"GISuporte server fixed to {SERVER}; relay={SERVER}; in-app logo and links validated")
 
 
 def main() -> None:
@@ -160,7 +210,7 @@ def main() -> None:
     brand_flutter_ui()
     brand_translations()
     generate_icons()
-    print(f"Configured {APP_NAME} ID/relay server: {SERVER}")
+    validate_branding()
 
 
 if __name__ == "__main__":
