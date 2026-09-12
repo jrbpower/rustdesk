@@ -48,7 +48,7 @@ jobs:
           if (-not (Test-Path "flutter/assets/icon.png")) {
             throw "Logo interno GISuporte nao foi gerado"
           }
-          Select-String -Path src/flutter_ffi.rs -Pattern "191.252.210.203"
+          Select-String -Path src/lib.rs -Pattern "gisuporte.vps-kinghost.net"
           Select-String -Path flutter/windows/runner/Runner.rc -Pattern "GISuporte"
           $badLinks = Get-ChildItem flutter/lib -Recurse -Filter *.dart | Select-String -Pattern 'https?://(www\.)?rustdesk\.com'
           if ($badLinks) {
@@ -135,6 +135,26 @@ jobs:
           Copy-Item -Path .\flutter\build\windows\x64\runner\Release\* -Destination .\gisuporte -Recurse -Force
           Rename-Item -Path .\gisuporte\rustdesk.exe -NewName GISuporte.exe
 
+      - name: Gerar instalador autoexecutavel GISuporte
+        shell: pwsh
+        run: |
+          Push-Location .\libs\portable
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python .\generate.py -f ..\..\gisuporte -o . -e ..\..\gisuporte\GISuporte.exe
+          Pop-Location
+
+          $packer = ".\target\release\rustdesk-portable-packer.exe"
+          if (-not (Test-Path $packer)) {
+            throw "Portable packer do GISuporte nao foi gerado"
+          }
+
+          New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
+          Move-Item -Path $packer -Destination ".\artifacts\GISuporte-${{ env.VERSION }}-x64-install.exe" -Force
+
+          if (-not (Test-Path ".\artifacts\GISuporte-${{ env.VERSION }}-x64-install.exe")) {
+            throw "Instalador autoexecutavel GISuporte nao foi gerado"
+          }
+
       - name: Adicionar MSBuild ao PATH
         uses: microsoft/setup-msbuild@v2
 
@@ -150,11 +170,12 @@ jobs:
           Copy-Item .\res\msi\Package\bin\x64\Release\en-us\Package.msi .\artifacts\GISuporte-${{ env.VERSION }}-x64.msi
           Copy-Item .\gisuporte\GISuporte.exe .\artifacts\GISuporte-${{ env.VERSION }}-x64.exe
 
-      - name: Publicar instalador e executavel
+      - name: Publicar instaladores e executavel
         uses: actions/upload-artifact@v4
         with:
           name: GISuporte-${{ env.VERSION }}-Windows-x64
           path: |
+            ./artifacts/GISuporte-${{ env.VERSION }}-x64-install.exe
             ./artifacts/GISuporte-${{ env.VERSION }}-x64.msi
             ./artifacts/GISuporte-${{ env.VERSION }}-x64.exe
           if-no-files-found: error
