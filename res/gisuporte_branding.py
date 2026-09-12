@@ -4,45 +4,51 @@ import io
 import re
 
 APP_NAME = "GISuporte"
-SERVER = "191.252.210.203"
+SERVER = "gisuporte.vps-kinghost.net"
 KEY = "aUbDo6Map3oFCVpb9VB66sNTbuvz3bX3iCoKVBGVUe4="
 SUPPORT_URL = "https://github.com/jrbpower/GI-SUPORTE-REMOTO"
 
 
 def configure_server() -> None:
+    """Make Flutter initialize the GISuporte identity before async/config access.
+
+    Server/key defaults themselves live in src/lib.rs.  Keeping them there avoids
+    a second, divergent runtime configuration path in flutter_ffi.rs.
+    """
     path = Path("src/flutter_ffi.rs")
     text = path.read_text(encoding="utf-8")
 
-    old = """    if custom_client_config.is_empty() {
+    old_start = """fn initialize(app_dir: &str, custom_client_config: &str) {
+    flutter::async_tasks::start_flutter_async_runner();
+"""
+    new_start = """fn initialize(app_dir: &str, custom_client_config: &str) {
+    // GISuporte: establish APP_NAME/server defaults before any Flutter async task
+    // can lazily initialize hbb_common configuration as RustDesk.
+    crate::load_custom_client();
+    if !custom_client_config.is_empty() {
+        crate::read_custom_client(custom_client_config);
+    }
+    flutter::async_tasks::start_flutter_async_runner();
+"""
+
+    old_custom_block = """    // core_main's load_custom_client does not work for flutter since it is only applied to its load_library in main.c
+    if custom_client_config.is_empty() {
         crate::load_custom_client();
     } else {
         crate::read_custom_client(custom_client_config);
     }
 """
-    new = f"""    // GISuporte: force the self-hosted infrastructure on every startup.
-    // RustDesk 1.4.9 read_custom_client() expects an encoded/signed payload, so
-    // a plain host=...,key=...,relay=... string is intentionally not used here.
-    *config::EXE_RENDEZVOUS_SERVER.write().unwrap() = "{SERVER}".to_owned();
-    {{
-        let mut settings = config::OVERWRITE_SETTINGS.write().unwrap();
-        settings.insert("custom-rendezvous-server".to_owned(), "{SERVER}".to_owned());
-        settings.insert("relay-server".to_owned(), "{SERVER}".to_owned());
-        settings.insert("key".to_owned(), "{KEY}".to_owned());
-    }}
-"""
-    if new not in text:
-        if old not in text:
-            raise RuntimeError("RustDesk Flutter custom-client initialization block was not found")
-        text = text.replace(old, new, 1)
 
-    app_name_line = f'    *config::APP_NAME.write().unwrap() = "{APP_NAME}".to_owned();\n'
-    if app_name_line not in text:
-        marker = "    // core_main's load_custom_client does not work for flutter since it is only applied to its load_library in main.c\n"
-        if marker not in text:
-            raise RuntimeError("RustDesk Flutter initialization marker was not found")
-        text = text.replace(marker, app_name_line + marker, 1)
+    if new_start not in text:
+        if old_start not in text:
+            raise RuntimeError("RustDesk Flutter initialize() start block was not found")
+        text = text.replace(old_start, new_start, 1)
+
+    if old_custom_block in text:
+        text = text.replace(old_custom_block, "", 1)
 
     path.write_text(text, encoding="utf-8")
+    print(f"GISuporte runtime defaults use {SERVER}; Flutter initialization order fixed")
 
 
 def brand_flutter_ui() -> None:
@@ -138,18 +144,14 @@ def generate_icons() -> None:
     square = Image.new("RGB", (side, side), "black")
     square.paste(image, ((side - image.width) // 2, (side - image.height) // 2))
 
-    # Flutter's loadIcon() looks for assets/icon.png first and only falls back
-    # to assets/icon.svg (the upstream RustDesk logo) when the PNG is missing.
+    # Flutter in-app icon.
     flutter_icon = Path("flutter/assets/icon.png")
     flutter_icon.parent.mkdir(parents=True, exist_ok=True)
     square.resize((512, 512), Image.Resampling.LANCZOS).save(
         flutter_icon, "PNG", optimize=True
     )
 
-    # Android 8+ resolves @mipmap/ic_launcher to the adaptive icon XML in
-    # mipmap-anydpi-v26. That XML uses ic_launcher_foreground, so replacing
-    # only ic_launcher.png leaves the RustDesk launcher icon visible.
-    # Generate legacy, round and adaptive-foreground resources for every density.
+    # Android legacy, round and adaptive foreground resources.
     android_sizes = {
         "mipmap-mdpi": (48, 108),
         "mipmap-hdpi": (72, 162),
@@ -162,14 +164,10 @@ def generate_icons() -> None:
         folder = base / density
         folder.mkdir(parents=True, exist_ok=True)
 
-        legacy = square.resize(
-            (legacy_size, legacy_size), Image.Resampling.LANCZOS
-        )
+        legacy = square.resize((legacy_size, legacy_size), Image.Resampling.LANCZOS)
         legacy.save(folder / "ic_launcher.png", "PNG", optimize=True)
         legacy.save(folder / "ic_launcher_round.png", "PNG", optimize=True)
 
-        # Adaptive foreground canvas is 108dp. Keep the actual logo inside the
-        # central safe area so Android launcher masks do not crop it.
         foreground = Image.new("RGBA", (foreground_size, foreground_size), (0, 0, 0, 0))
         logo_size = int(foreground_size * 0.66)
         logo = square.resize((logo_size, logo_size), Image.Resampling.LANCZOS).convert("RGBA")
@@ -177,35 +175,48 @@ def generate_icons() -> None:
         foreground.alpha_composite(logo, (offset, offset))
         foreground.save(folder / "ic_launcher_foreground.png", "PNG", optimize=True)
 
-    ico = Path("flutter/windows/runner/resources/app_icon.ico")
-    ico.parent.mkdir(parents=True, exist_ok=True)
-    square.save(
-        ico,
-        format="ICO",
-        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
-    )
-    print("GISuporte Flutter, Android legacy/adaptive and Windows icons generated")
+    # Windows must use the exact approved GISuporteV2 .ico already committed to
+    # res/icon.ico; do not regenerate a different ICO from the JPEG.
+    approved_ico = Path("res/icon.ico")
+    if not approved_ico.exists():
+        raise RuntimeError("Approved GISuporte Windows icon is missing: res/icon.ico")
+    runner_ico = Path("flutter/windows/runner/resources/app_icon.ico")
+    runner_ico.parent.mkdir(parents=True, exist_ok=True)
+    runner_ico.write_bytes(approved_ico.read_bytes())
+    print("GISuporte Flutter/Android icons generated; approved V2 Windows ICO preserved")
 
 
 def validate_branding() -> None:
+    lib = Path("src/lib.rs").read_text(encoding="utf-8")
     ffi = Path("src/flutter_ffi.rs").read_text(encoding="utf-8")
 
-    required = [
-        f'EXE_RENDEZVOUS_SERVER.write().unwrap() = "{SERVER}"',
-        f'"custom-rendezvous-server".to_owned(), "{SERVER}".to_owned()',
-        f'"relay-server".to_owned(), "{SERVER}".to_owned()',
-        f'"key".to_owned(), "{KEY}".to_owned()',
-        f'APP_NAME.write().unwrap() = "{APP_NAME}"',
+    required_lib = [
+        f'const GISUPORTE_APP_NAME: &str = "{APP_NAME}"',
+        f'const GISUPORTE_RENDEZVOUS_SERVER: &str = "{SERVER}"',
+        f'const GISUPORTE_RS_PUB_KEY: &str = "{KEY}"',
+        '*hbb_common::config::APP_NAME.write().unwrap() = GISUPORTE_APP_NAME.to_owned()',
     ]
-    missing = [item for item in required if item not in ffi]
+    missing = [item for item in required_lib if item not in lib]
     if missing:
-        raise RuntimeError(f"GISuporte server/branding validation failed; missing: {missing}")
-    if "crate::load_custom_client();" in ffi or "crate::read_custom_client(custom_client_config);" in ffi:
-        raise RuntimeError("GISuporte validation failed: upstream custom-client fallback is still active")
+        raise RuntimeError(f"GISuporte runtime validation failed; missing in src/lib.rs: {missing}")
+
+    load_pos = ffi.find("crate::load_custom_client();")
+    async_pos = ffi.find("flutter::async_tasks::start_flutter_async_runner();")
+    if load_pos < 0 or async_pos < 0 or load_pos > async_pos:
+        raise RuntimeError(
+            "GISuporte validation failed: load_custom_client() must run before Flutter async runner"
+        )
+    if "EXE_RENDEZVOUS_SERVER.write().unwrap()" in ffi:
+        raise RuntimeError("GISuporte validation failed: legacy Flutter server override is still active")
 
     icon = Path("flutter/assets/icon.png")
     if not icon.exists() or not icon.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"):
         raise RuntimeError("GISuporte validation failed: Flutter in-app icon was not generated")
+
+    approved_ico = Path("res/icon.ico").read_bytes()
+    runner_ico = Path("flutter/windows/runner/resources/app_icon.ico").read_bytes()
+    if approved_ico != runner_ico:
+        raise RuntimeError("GISuporte validation failed: Windows icon differs from approved GISuporteV2 ICO")
 
     android_base = Path("flutter/android/app/src/main/res")
     for density in [
@@ -222,9 +233,7 @@ def validate_branding() -> None:
                     f"GISuporte validation failed: Android launcher resource missing/invalid: {candidate}"
                 )
 
-    adaptive_xml = (
-        android_base / "mipmap-anydpi-v26" / "ic_launcher.xml"
-    ).read_text(encoding="utf-8")
+    adaptive_xml = (android_base / "mipmap-anydpi-v26" / "ic_launcher.xml").read_text(encoding="utf-8")
     if '@mipmap/ic_launcher_foreground' not in adaptive_xml:
         raise RuntimeError("GISuporte validation failed: Android adaptive icon foreground is not configured")
 
@@ -240,7 +249,7 @@ def validate_branding() -> None:
         )
 
     print("GISUPORTE_VALIDATION_OK")
-    print(f"GISuporte server fixed to {SERVER}; relay={SERVER}; launcher/in-app icons and links validated")
+    print(f"GISuporte server fixed to {SERVER}; approved Windows icon and initialization order validated")
 
 
 def main() -> None:

@@ -36,6 +36,34 @@ pub mod flutter;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 pub mod flutter_ffi;
 use common::*;
+
+const GISUPORTE_APP_NAME: &str = "GISuporte";
+const GISUPORTE_RENDEZVOUS_SERVER: &str = "gisuporte.vps-kinghost.net";
+const GISUPORTE_RS_PUB_KEY: &str = "aUbDo6Map3oFCVpb9VB66sNTbuvz3bX3iCoKVBGVUe4=";
+
+/// Apply the GISuporte identity and self-hosted server defaults while keeping
+/// the current RustDesk 1.4.9 runtime/service implementation intact.
+///
+/// APP_NAME must be set before any upstream custom-client/config access. The
+/// hbb_common configuration is lazy-initialized and the first access decides
+/// whether files are created as RustDesk*.toml or GISuporte*.toml.
+pub fn load_custom_client() {
+    *hbb_common::config::APP_NAME.write().unwrap() = GISUPORTE_APP_NAME.to_owned();
+    *hbb_common::config::PROD_RENDEZVOUS_SERVER
+        .write()
+        .unwrap() = GISUPORTE_RENDEZVOUS_SERVER.to_owned();
+
+    // Keep support for upstream signed custom-client configuration, but only
+    // after the GISuporte identity has been established.
+    common::load_custom_client();
+
+    hbb_common::config::Config::set_option(
+        "custom-rendezvous-server".to_owned(),
+        GISUPORTE_RENDEZVOUS_SERVER.to_owned(),
+    );
+    hbb_common::config::Config::set_option("key".to_owned(), GISUPORTE_RS_PUB_KEY.to_owned());
+}
+
 mod auth_2fa;
 #[cfg(not(target_os = "ios"))]
 mod clipboard;
@@ -52,25 +80,3 @@ pub mod plugin;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod tray;
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-mod whiteboard;
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-mod updater;
-
-mod ui_cm_interface;
-mod ui_interface;
-mod ui_session_interface;
-
-mod hbbs_http;
-
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-pub mod clipboard_file;
-
-pub mod privacy_mode;
-
-#[cfg(windows)]
-pub mod virtual_display_manager;
-
-mod kcp_stream;
