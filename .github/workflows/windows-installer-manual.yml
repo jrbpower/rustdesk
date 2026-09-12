@@ -2,6 +2,14 @@ name: GISuporte - Gerar Instalador Windows
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature/gisuporte-v2-migration
+    paths:
+      - ".github/workflows/windows-installer-manual.yml"
+      - "src/lib.rs"
+      - "res/gisuporte_branding.py"
+      - "libs/portable/**"
 
 permissions:
   contents: read
